@@ -301,14 +301,20 @@ export class BinaryManager {
     }
 
     const modelPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
-    const hasWeights = fs.existsSync(modelPath);
+    const fallbackDevModel = path.join('D:\\CreatorVault\\bin\\models', 'RealESRGAN_x4plus.pth');
+    const resolvedModelPath = fs.existsSync(modelPath)
+      ? modelPath
+      : fs.existsSync(fallbackDevModel)
+        ? fallbackDevModel
+        : modelPath;
+    const hasWeights = fs.existsSync(resolvedModelPath);
 
     for (const candidate of this.getPythonCandidates()) {
       if (this.hasPythonModule(candidate.cmd, 'spandrel') && hasWeights) {
         return {
           name: 'realesrgan',
           available: true,
-          resolvedPath: modelPath,
+          resolvedPath: resolvedModelPath,
           source: 'local-bin',
           version: 'Real-ESRGAN x4plus (CUDA/PyTorch)',
           installHint: 'pip install -U spandrel torchvision'

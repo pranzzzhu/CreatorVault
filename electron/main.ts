@@ -37,7 +37,10 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist');
 
 let mainWindow: BrowserWindow | null = null;
 
-const binaryManager = new BinaryManager(process.env.APP_ROOT);
+// When packaged as a standalone .exe, store sidecar binaries & AI models in userData (%APPDATA%/vortex-media-engine)
+// so the 1-Click Installer always has write access and models persist across updates.
+const sidecarRoot = app.isPackaged ? app.getPath('userData') : process.env.APP_ROOT;
+const binaryManager = new BinaryManager(sidecarRoot);
 const ffmpegRunner = new FfmpegRunner(
   () => binaryManager.getBinaryPath('ffmpeg'),
   () => binaryManager.isBinaryAvailable('ffmpeg')

@@ -545,7 +545,9 @@ out_rgba.save(out_path, 'PNG')
     }
 
     // Check for PyTorch Spandrel + RealESRGAN_x4plus.pth sidecar model in ./bin/models
-    const weightsPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
+    const primaryWeights = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
+    const devWeights = path.join('D:\\CreatorVault\\bin\\models', 'RealESRGAN_x4plus.pth');
+    const weightsPath = fs.existsSync(primaryWeights) ? primaryWeights : devWeights;
     if (fs.existsSync(weightsPath)) {
       try {
         onProgress({

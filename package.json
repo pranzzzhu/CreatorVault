@@ -2,12 +2,38 @@
   "name": "vortex-media-engine",
   "version": "0.1.0",
   "description": "Local-First Creator Media Engine — Universal Clipper, Ripper & AI Stem Lab",
+  "author": "Pranshu (pranzzzhu)",
+  "license": "MIT",
   "main": "dist-electron/main.js",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dist:win": "tsc && vite build && electron-builder --win --x64",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "com.creatorvault.vortex",
+    "productName": "Vortex",
+    "npmRebuild": false,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "dir",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}"
+    }
   },
   "dependencies": {
     "lucide-react": "^1.70.0",
@@ -23,6 +49,7 @@
     "@vitejs/plugin-react": "^6.2.1",
     "daisyui": "^5.7.50",
     "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.6",
