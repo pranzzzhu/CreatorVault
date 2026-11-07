@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build & Electron Output
+dist/
+dist-electron/
+release/
+out/
+
+# Local Sidecar Binaries & AI Model Weights (>100MB — installed via 1-Click Installer or GitHub Releases)
+bin/
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.exe
+*.dll
+
+# Local Media Exports & Temp Files
+exports/
+Test Downloads/
+.hallmark/
+ffmpeg2pass*
+
+# Environment & IDE
+.env
+.env.local
+.env.*.local
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
