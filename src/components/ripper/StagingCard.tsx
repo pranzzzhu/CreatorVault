@@ -107,8 +107,10 @@ export const StagingCard: React.FC = () => {
             <summary className="btn btn-sm btn-outline gap-2 font-normal">
               <span>{activeQualityObj?.label || selectedQuality}</span>
               <span className="badge badge-xs badge-neutral num">
-                {editReadyMode && !activeQualityObj?.isAudioOnly
-                  ? 'H.264 MP4'
+                {editReadyMode
+                  ? activeQualityObj?.isAudioOnly
+                    ? 'PCM WAV'
+                    : 'H.264 MP4'
                   : activeQualityObj?.codecBadge}
               </span>
               <ChevronDown className="w-3.5 h-3.5 opacity-60" />
@@ -130,7 +132,7 @@ export const StagingCard: React.FC = () => {
                   >
                     <span>{q.label}</span>
                     <span className="badge badge-xs badge-ghost num">
-                      {editReadyMode && !q.isAudioOnly ? 'H.264 MP4' : q.codecBadge}
+                      {editReadyMode ? (q.isAudioOnly ? 'PCM WAV' : 'H.264 MP4') : q.codecBadge}
                     </span>
                   </button>
                 </li>

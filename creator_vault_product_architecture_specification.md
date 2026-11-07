@@ -8,10 +8,10 @@
 ## 1. EXECUTIVE SUMMARY & VISION
 **VORTEX** is an obsessive, ultra-sleek desktop media utility ("Stacher7 meets Raycast for Video Editors, Producers, and Designers"). It takes the world's most powerful command-line media and AI engines (`yt-dlp`, `FFmpeg`, `Demucs`, `gallery-dl`, `VTracer`, and `ONNX`) and wraps them in a frictionless, zero-terminal, outcome-driven dark-mode interface.
 
-The application is designed around a **3-Module Unified Architecture**, shipped in sequential phases:
-* **MODULE 1 (PHASE 1 — PRIMARY BUILD TARGET):** **The Ripper, Clipper & Stem Lab.** Paste any URL $\rightarrow$ preview and trim exact timestamp sections before downloading $\rightarrow$ enforce Premiere/AE-safe codecs (`H.264`/`ProRes`/`.wav`) $\rightarrow$ locally split audio into isolated AI stems (`Vocals`, `Instrumental`, `Drums`, `Bass`) via GPU $\rightarrow$ drag and drop directly onto an editing timeline.
-* **MODULE 2 (PHASE 2 — PLUG-IN EXPANSION):** **The FFmpeg Video Fixer & Proxy Deck.** Drag-and-drop local camera footage to kill LED rolling-shutter flicker, generate instant ProRes/DNxHR proxies, compress to exact Discord/WhatsApp file sizes (10MB/25MB), and chop dead-air silence into Premiere XML timelines.
-* **MODULE 3 (PHASE 3 — PLUG-IN EXPANSION):** **The Vectorizer, Background & Upscale Dock.** Local GPU batch background removal (`RMBG-2.0`), 4x image upscaling (`Real-ESRGAN`), and raster-to-SVG vectorization (`VTracer`).
+The application is designed around a **3-Module Unified Architecture**, all shipped in `v0.1.0`:
+* **MODULE 1 (SHIPPED):** **The Ripper, Clipper & Stem Lab.** Paste any URL $\rightarrow$ preview and trim exact timestamp sections before downloading $\rightarrow$ enforce Premiere/AE-safe codecs (`H.264`/`ProRes`/`.wav`) $\rightarrow$ locally split audio into isolated AI stems (`Vocals`, `Instrumental`, `Drums`, `Bass`) via GPU $\rightarrow$ drag and drop directly onto an editing timeline.
+* **MODULE 2 (SHIPPED):** **The FFmpeg Video Fixer & Proxy Deck.** Drag-and-drop local camera footage to kill LED rolling-shutter flicker, generate instant ProRes 422 proxies, compress to exact Discord/WhatsApp file sizes (8MB–100MB), and chop dead-air silence into Premiere XML timelines.
+* **MODULE 3 (SHIPPED):** **The Vectorizer, Background & Upscale Dock.** Local batch background removal (`U2Net ONNX`), 2x/4x image upscaling (`Real-ESRGAN`), and raster-to-SVG spline vectorization (`VTracer`).
 
 ---
 
@@ -37,8 +37,9 @@ To ensure a tiny installer footprint, instant startup, native OS drag-and-drop s
   5. `vtracer` (`vtracer 0.6.15` Rust spline raster-to-SVG vectorizer).
   6. `realesrgan` (`RealESRGAN_x4plus.pth` neural 2x/4x super-resolution via PyTorch `spandrel` or `realesrgan-ncnn-vulkan`).
 * *Deferred Phase 4 Target:* `gallery-dl` (for multi-image album dumps).
-* **Hardware Telemetry Probe (`HardwareProbe.ts`):**
+* **Hardware Telemetry Probe (`HardwareProbe.ts`) & Resource Guards:**
   * Probes `nvidia-smi` and `ffmpeg -encoders` on launch to detect **NVIDIA CUDA (`nvenc` / `cuda`)**, **Apple Silicon (`mps`)**, or **CPU fallback**.
+  * Enforces synchronous process tree termination (`killProcessTree` via `taskkill /T /F` on Windows) on job cancellation and app exit, FIFO GPU mutex serialization (`gpuMutex`) in `StemRunner.ts`, and sequential `for...of` batch queues in `useJobStore.ts`.
 
 ---
 
@@ -62,7 +63,7 @@ To ensure a tiny installer footprint, instant startup, native OS drag-and-drop s
   yt-dlp -f "<format_selector>" \
     --download-sections "*01:14:20-01:14:38" \
     --force-keyframes-at-cuts \
-    --ffmpeg-location "./bin/ffmpeg.exe" \
+    --ffmpeg-location "<resolved_ffmpeg_path>" \
     --newline \
     --progress-template "download:{\"percent\":\"%(progress._percent_str)s\",\"speed\":\"%(progress._speed_str)s\",\"eta\":\"%(progress._eta_str)s\"}" \
     -o "<output_path>" "<URL>"
@@ -71,11 +72,11 @@ To ensure a tiny installer footprint, instant startup, native OS drag-and-drop s
 
 ### 3.3 Feature 3: "NLE Edit-Ready" Safe Mode vs. Raw Mode
 * **Problem Solved:** `yt-dlp` defaults to `.webm` (VP9/AV1 + Opus) and `.webp` thumbnails, which fail to import or cause severe timeline lag in Adobe Premiere Pro, After Effects, and DaVinci Resolve.
-* **UI Component:** Global pill switch in the top header: **`[ ⚡ Edit-Ready (MP4/WAV) ]`** vs **`[ Raw Stream ]`**.
+* **UI Component:** Toggle in the Settings modal (`DiagnosticsPanel.tsx`) & status badge in `SidebarRail.tsx`: **`[Edit-Ready]`** vs **`[Raw]`**.
 * **Execution:**
-  * **If Video + Edit-Ready is active:** Forces `H.264` (`avc1`) + `AAC` inside a standard `.mp4` container (or automatically transcodes via `h264_nvenc` if only VP9/AV1 exists for 4K):
+  * **If Video + Edit-Ready is active:** Forces `H.264` (`avc1`) + `AAC` inside a standard `.mp4` container using lossless container remuxing (`--remux-video mp4`):
     ```bash
-    -f "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo+bestaudio" --merge-output-format mp4 --recode-video mp4
+    -f "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo+bestaudio" --merge-output-format mp4 --remux-video mp4
     ```
   * **If Audio-Only + Edit-Ready is active:** Extracts uncompressed `48kHz 16-bit PCM .wav` (instead of variable-bitrate `.mp3` which causes Premiere timeline drift):
     ```bash
@@ -90,17 +91,17 @@ To ensure a tiny installer footprint, instant startup, native OS drag-and-drop s
   * **4-Stem Studio Mode (`htdemucs`):** Outputs `Vocals.wav`, `Drums.wav`, `Bass.wav`, `Other.wav`. (Ideal for producers/remixers).
 * **Execution Pipeline:**
   1. Job Stage 1 (`0% -> 50%`): `yt-dlp` downloads and extracts the target clip/audio.
-  2. Job Stage 2 (`50% -> 100%`): Immediately pipes the output file into the local Demucs worker:
+  2. Job Stage 2 (`50% -> 100%`): Immediately pipes the normalized 48kHz WAV file into the local Demucs worker:
      ```bash
-     python -m demucs.separate -n htdemucs -d cuda --out "<output_dir>/stems" "<downloaded_audio_file>"
+     <resolved_python_path> -m demucs.separate -n htdemucs -d <recommended_device> --out "<output_dir>/stems" "<normalized_wav_file>"
      ```
   3. Parses Demucs `stderr` progress (`%|████| 45/100`) and updates the UI status badge to `"Separating Stems on GPU (45%)..."`.
 
 ### 3.5 Feature 5: In-App Stem Mixer & Native Drag-to-Timeline
 * **UI Component:** Once a job completes, the Job Card expands to show **draggable stem pills**:
   * `[ 🎤 Vocals.wav ]` `[ 🎹 Instrumental.wav ]` `[ 🥁 Drums.wav ]` `[ 🎸 Bass.wav ]` `[ 🎬 Full_Clip.mp4 ]`
-* **Interactive Preview:** Clicking the Play button on a completed card plays the synchronized stems using `WaveSurfer.js`, allowing the user to **Solo (S)** or **Mute (M)** individual stems right inside the app to verify cleanliness.
-* **Native OS Drag-and-Drop:** Users can click and drag any stem pill `[ 🎤 Vocals.wav ]` directly out of the app window and drop it straight onto an open **Adobe Premiere Pro, After Effects, DaVinci Resolve, or FL Studio** timeline using Electron's native `ipcRenderer.send('ondragstart', filePath)` API.
+* **Interactive Preview:** Clicking the Play button on a completed card plays the synchronized stems using the **Synchronized HTML5 Multi-Track Stem Mixer** (`<35ms` phase-drift alignment), allowing the user to **Solo (S)** or **Mute (M)** individual stems right inside the app to verify cleanliness.
+* **Native OS Drag-and-Drop:** Users can click and drag any stem pill `[ 🎤 Vocals.wav ]` directly out of the app window and drop it straight onto an open **Adobe Premiere Pro, After Effects, DaVinci Resolve, or FL Studio** timeline via `ipcRenderer.send('ondragstart', filePath)` $\rightarrow$ `webContents.startDrag({ file, icon })`.
 
 ### 3.6 Feature 6: Browser Cookie Bypass (Zero Login Errors)
 * **Problem Solved:** Age-restricted YouTube videos, Instagram Reels, or private lectures failing with `403 Forbidden` or `Sign in to confirm your age`.
@@ -154,7 +155,7 @@ The UI left-hand navigation rail must be built from Day 1 with three distinct wo
 ## 5. TARGET FOLDER STRUCTURE
 
 ```text
-vortex-media-engine/
+CreatorVault/ (vortex-media-engine)
 ├── electron/
 │   ├── main.ts                      # Window creation, IPC handlers, vortex-media:// protocol, Native File Drag
 │   ├── preload.ts                   # ContextBridge exposing safe IPC APIs & webUtils.getPathForFile
@@ -169,7 +170,6 @@ vortex-media-engine/
 │   ├── components/
 │   │   ├── layout/
 │   │   │   ├── SidebarRail.tsx      # Navigation between Module 1 (Rip), 2 (Fix), 3 (Vec) + telemetry
-│   │   │   ├── TopStatusBar.tsx     # Edit-Ready Toggle, GPU status badge, Cookie selector
 │   │   │   └── DiagnosticsPanel.tsx # Settings modal with 1-Click Sidecar Installer & theme/output config
 │   │   ├── ripper/
 │   │   │   ├── UrlCommandBar.tsx    # Auto-paste detector & URL input

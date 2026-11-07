@@ -108,7 +108,6 @@ CreatorVault/
 │   ├── components/
 │   │   ├── layout/
 │   │   │   ├── SidebarRail.tsx        # Workspace navigation, hardware telemetry & zoom controls
-│   │   │   ├── TopStatusBar.tsx       # Edit-Ready mode toggle, GPU badge & cookie selector
 │   │   │   └── DiagnosticsPanel.tsx   # Settings modal with 1-Click Sidecar Installer & theme switcher
 │   │   ├── ripper/
 │   │   │   ├── UrlCommandBar.tsx      # Global Ctrl+V listener & URL command bar

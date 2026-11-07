@@ -1,5 +1,6 @@
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   JobProgressEvent,
@@ -371,11 +372,7 @@ ${pathElements}
     onProgress: (ev: JobProgressEvent) => void
   ): Promise<void> {
     // 1. Primary: Direct ONNX Runtime U2Net neural segmentation (~1.5s, bypasses rembg pooch/numba hangs)
-    const u2netPath = path.join(
-      process.env.USERPROFILE || process.env.HOME || '',
-      '.u2net',
-      'u2net.onnx'
-    );
+    const u2netPath = path.join(os.homedir(), '.u2net', 'u2net.onnx');
 
     if (fs.existsSync(u2netPath)) {
       try {
