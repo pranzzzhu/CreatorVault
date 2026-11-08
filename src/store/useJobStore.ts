@@ -55,6 +55,14 @@ interface JobStoreState {
   useHardwareEncoder: boolean;
   fixerError: string | null;
 
+  // Reel Optimizer Options
+  reelPlatform: 'ig-reels' | 'tiktok' | 'yt-shorts';
+  reelTargetFps: 'keep' | '30' | '60';
+  reelPreSharpen: 'none' | 'subtle' | 'crisp';
+  reelDenoiseGrain: boolean;
+  reelColorFixRec709: boolean;
+  reelSimulateIgCompression: boolean;
+
   // Phase 3: Vector, Background & Upscale State
   stagedLocalImages: LocalImageMetadata[];
   selectedVectorPreset: VectorPresetId;
@@ -99,6 +107,12 @@ interface JobStoreState {
   setSilenceMinDuration: (sec: number) => void;
   setDeflickerWindow: (win: number) => void;
   setUseHardwareEncoder: (enabled: boolean) => void;
+  setReelPlatform: (platform: 'ig-reels' | 'tiktok' | 'yt-shorts') => void;
+  setReelTargetFps: (fps: 'keep' | '30' | '60') => void;
+  setReelPreSharpen: (sharpen: 'none' | 'subtle' | 'crisp') => void;
+  setReelDenoiseGrain: (denoise: boolean) => void;
+  setReelColorFixRec709: (colorFix: boolean) => void;
+  setReelSimulateIgCompression: (simulate: boolean) => void;
   browseAndStageLocalVideos: () => Promise<void>;
   stageLocalVideoPaths: (paths: string[]) => Promise<void>;
   removeStagedLocalVideo: (filePath: string) => void;
@@ -153,13 +167,20 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   stemMode: 'off',
 
   stagedLocalVideos: [],
-  selectedFixerPreset: 'deflicker',
+  selectedFixerPreset: 'reel-optimizer',
   targetSizeMB: 10,
   silenceThresholdDb: -30,
   silenceMinDuration: 0.5,
   deflickerWindow: 7,
   useHardwareEncoder: true,
   fixerError: null,
+
+  reelPlatform: 'ig-reels',
+  reelTargetFps: 'keep',
+  reelPreSharpen: 'subtle',
+  reelDenoiseGrain: true,
+  reelColorFixRec709: true,
+  reelSimulateIgCompression: true,
 
   stagedLocalImages: [],
   selectedVectorPreset: 'vtracer',
@@ -226,6 +247,12 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   setSilenceMinDuration: (silenceMinDuration) => set({ silenceMinDuration }),
   setDeflickerWindow: (deflickerWindow) => set({ deflickerWindow }),
   setUseHardwareEncoder: (useHardwareEncoder) => set({ useHardwareEncoder }),
+  setReelPlatform: (reelPlatform) => set({ reelPlatform }),
+  setReelTargetFps: (reelTargetFps) => set({ reelTargetFps }),
+  setReelPreSharpen: (reelPreSharpen) => set({ reelPreSharpen }),
+  setReelDenoiseGrain: (reelDenoiseGrain) => set({ reelDenoiseGrain }),
+  setReelColorFixRec709: (reelColorFixRec709) => set({ reelColorFixRec709 }),
+  setReelSimulateIgCompression: (reelSimulateIgCompression) => set({ reelSimulateIgCompression }),
 
   browseAndStageLocalVideos: async () => {
     if (!window.vortexApi?.selectVideoFiles) return;
@@ -277,7 +304,8 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
       deflicker: '1080p',
       'target-size': '720p',
       'prores-proxy': '1080p',
-      'silence-xml': '1080p'
+      'silence-xml': '1080p',
+      'reel-optimizer': '1080p'
     };
 
     const videosToProcess = [...state.stagedLocalVideos];
@@ -300,7 +328,15 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
         silenceMinDuration: state.silenceMinDuration,
         deflickerWindow: state.deflickerWindow,
         useHardwareEncoder: state.useHardwareEncoder,
-        outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || './exports'
+        outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || './exports',
+        reelOptimizer: {
+          platform: state.reelPlatform,
+          targetFps: state.reelTargetFps,
+          preSharpen: state.reelPreSharpen,
+          denoiseGrain: state.reelDenoiseGrain,
+          colorFixRec709: state.reelColorFixRec709,
+          simulateIgCompression: state.reelSimulateIgCompression
+        }
       };
 
       const newJob: JobItem = {
@@ -346,6 +382,7 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
                   statusMessage: 'Ready — Drag processed media to timeline',
                   outputFilePath: result.outputFilePath,
                   pills: result.pills,
+                  vmafComparison: result.vmafComparison,
                   usedSimulation: false
                 }
               : j

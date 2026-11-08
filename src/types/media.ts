@@ -17,7 +17,23 @@ export type StemMode = 'off' | '2-stem' | '4-stem';
 
 export type BrowserSource = 'none' | 'chrome' | 'brave' | 'edge' | 'firefox';
 
-export type FixerPresetId = 'deflicker' | 'target-size' | 'silence-xml' | 'prores-proxy';
+export type FixerPresetId =
+  | 'deflicker'
+  | 'target-size'
+  | 'silence-xml'
+  | 'prores-proxy'
+  | 'reel-optimizer';
+
+export type FixerPreset = FixerPresetId;
+
+export interface ReelOptimizerOptions {
+  platform: 'ig-reels' | 'tiktok' | 'yt-shorts';
+  targetFps: 'keep' | '30' | '60';
+  preSharpen: 'none' | 'subtle' | 'crisp';
+  denoiseGrain: boolean;
+  colorFixRec709: boolean;
+  simulateIgCompression: boolean;
+}
 
 export type VectorPresetId = 'vtracer' | 'rmbg' | 'esrgan';
 
@@ -69,6 +85,7 @@ export interface FixerJobConfig {
   deflickerWindow: number;
   useHardwareEncoder: boolean;
   outputDir: string;
+  reelOptimizer?: ReelOptimizerOptions;
 }
 
 export interface MediaFormatOption {
@@ -149,6 +166,11 @@ export interface JobItem {
   pills: StemOutputPill[];
   error?: string;
   usedSimulation?: boolean;
+  vmafComparison?: {
+    rawScore: number;
+    optimizedScore: number;
+    simulatedPreviewPath?: string;
+  };
 }
 
 export type BinaryName =
@@ -213,6 +235,11 @@ export interface VortexApi {
   startFixerJob: (jobId: string, config: FixerJobConfig) => Promise<{
     outputFilePath: string;
     pills: StemOutputPill[];
+    vmafComparison?: {
+      rawScore: number;
+      optimizedScore: number;
+      simulatedPreviewPath?: string;
+    };
   }>;
   selectImageFiles: () => Promise<string[]>;
   probeLocalImage: (filePath: string) => Promise<LocalImageMetadata>;

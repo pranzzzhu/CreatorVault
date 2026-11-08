@@ -9,6 +9,7 @@ import {
   Info,
   Play,
   Scissors,
+  ShieldCheck,
   Sparkles,
   Trash2,
   UploadCloud,
@@ -25,6 +26,13 @@ const FIXER_PRESETS: Array<{
   desc: string;
   icon: React.ComponentType<{ className?: string }>;
 }> = [
+  {
+    id: 'reel-optimizer',
+    title: 'Social Compression Armor (IG Reels / TikTok)',
+    badge: '1080×1920 Lanczos + Rec.709',
+    desc: 'Pre-compensates for aggressive platform re-compression using 1080×1920 Lanczos scaling, grain denoising, unsharp pre-emphasis, Rec.709 color lock, and post-upload simulation.',
+    icon: ShieldCheck
+  },
   {
     id: 'deflicker',
     title: 'LED Deflicker & De-Band',
@@ -73,12 +81,25 @@ export const FixerModuleView: React.FC = () => {
   const diagnostics = useJobStore((s) => s.diagnostics);
   const jobs = useJobStore((s) => s.jobs);
 
+  const reelPlatform = useJobStore((s) => s.reelPlatform);
+  const reelTargetFps = useJobStore((s) => s.reelTargetFps);
+  const reelPreSharpen = useJobStore((s) => s.reelPreSharpen);
+  const reelDenoiseGrain = useJobStore((s) => s.reelDenoiseGrain);
+  const reelColorFixRec709 = useJobStore((s) => s.reelColorFixRec709);
+  const reelSimulateIgCompression = useJobStore((s) => s.reelSimulateIgCompression);
+
   const setSelectedFixerPreset = useJobStore((s) => s.setSelectedFixerPreset);
   const setTargetSizeMB = useJobStore((s) => s.setTargetSizeMB);
   const setSilenceThresholdDb = useJobStore((s) => s.setSilenceThresholdDb);
   const setSilenceMinDuration = useJobStore((s) => s.setSilenceMinDuration);
   const setDeflickerWindow = useJobStore((s) => s.setDeflickerWindow);
   const setUseHardwareEncoder = useJobStore((s) => s.setUseHardwareEncoder);
+  const setReelPlatform = useJobStore((s) => s.setReelPlatform);
+  const setReelTargetFps = useJobStore((s) => s.setReelTargetFps);
+  const setReelPreSharpen = useJobStore((s) => s.setReelPreSharpen);
+  const setReelDenoiseGrain = useJobStore((s) => s.setReelDenoiseGrain);
+  const setReelColorFixRec709 = useJobStore((s) => s.setReelColorFixRec709);
+  const setReelSimulateIgCompression = useJobStore((s) => s.setReelSimulateIgCompression);
   const browseAndStageLocalVideos = useJobStore((s) => s.browseAndStageLocalVideos);
   const stageLocalVideoPaths = useJobStore((s) => s.stageLocalVideoPaths);
   const removeStagedLocalVideo = useJobStore((s) => s.removeStagedLocalVideo);
@@ -326,6 +347,124 @@ export const FixerModuleView: React.FC = () => {
       <div className="card bg-base-200 border border-base-300 p-4 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           {/* Dynamic Controls per Selected Preset */}
+          {selectedFixerPreset === 'reel-optimizer' && (
+            <div className="flex flex-wrap items-center gap-4">
+              {/* Target Platform */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-base-content/70 block">
+                  Platform
+                </span>
+                <div className="join">
+                  {(
+                    [
+                      { id: 'ig-reels', label: 'IG Reels' },
+                      { id: 'tiktok', label: 'TikTok' },
+                      { id: 'yt-shorts', label: 'Shorts' }
+                    ] as const
+                  ).map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setReelPlatform(p.id)}
+                      className={`btn btn-xs join-item num ${
+                        reelPlatform === p.id ? 'btn-primary' : 'btn-outline'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Target FPS */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-base-content/70 block">
+                  Target FPS
+                </span>
+                <div className="join">
+                  {(
+                    [
+                      { id: 'keep', label: 'Source' },
+                      { id: '30', label: '30' },
+                      { id: '60', label: '60' }
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setReelTargetFps(f.id)}
+                      className={`btn btn-xs join-item num ${
+                        reelTargetFps === f.id ? 'btn-primary' : 'btn-outline'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Pre-Sharpen */}
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-base-content/70 block">
+                  Pre-Sharpen
+                </span>
+                <div className="join">
+                  {(
+                    [
+                      { id: 'none', label: 'None' },
+                      { id: 'subtle', label: 'Subtle' },
+                      { id: 'crisp', label: 'Crisp' }
+                    ] as const
+                  ).map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => setReelPreSharpen(s.id)}
+                      className={`btn btn-xs join-item num ${
+                        reelPreSharpen === s.id ? 'btn-primary' : 'btn-outline'
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sleek Toggles */}
+              <div className="flex flex-wrap items-center gap-3 pt-1 sm:pt-0">
+                <label className="label cursor-pointer gap-2 py-0" title="Reduces high-frequency noise that causes macroblocking under platform compression">
+                  <span className="text-xs text-base-content/80">Grain Saver</span>
+                  <input
+                    type="checkbox"
+                    checked={reelDenoiseGrain}
+                    onChange={(e) => setReelDenoiseGrain(e.target.checked)}
+                    className="toggle toggle-xs toggle-primary"
+                  />
+                </label>
+
+                <label className="label cursor-pointer gap-2 py-0" title="Tags bt709 primaries and TV range to prevent washed-out colors on mobile. For SDR sources only; HDR/HLG footage needs tone-mapping in your NLE.">
+                  <span className="text-xs text-base-content/80">Rec.709 Lock</span>
+                  <input
+                    type="checkbox"
+                    checked={reelColorFixRec709}
+                    onChange={(e) => setReelColorFixRec709(e.target.checked)}
+                    className="toggle toggle-xs toggle-primary"
+                  />
+                </label>
+
+                <label className="label cursor-pointer gap-2 py-0" title="Simulates constrained 3.5Mbps platform re-compression and calculates VMAF retention lift">
+                  <span className="text-xs text-base-content/80">IG Simulation</span>
+                  <input
+                    type="checkbox"
+                    checked={reelSimulateIgCompression}
+                    onChange={(e) => setReelSimulateIgCompression(e.target.checked)}
+                    className="toggle toggle-xs toggle-primary"
+                  />
+                </label>
+              </div>
+            </div>
+          )}
+
           {selectedFixerPreset === 'deflicker' && (
             <div className="flex flex-wrap items-center gap-4">
               <div className="space-y-1">
@@ -443,7 +582,16 @@ export const FixerModuleView: React.FC = () => {
           {/* Right side: Hardware Encoder toggle + Execute CTA */}
           <div className="flex items-center gap-3 shrink-0">
             {selectedFixerPreset !== 'prores-proxy' && (
-              <label className="label cursor-pointer gap-2 py-0">
+              <label
+                className="label cursor-pointer gap-2 py-0"
+                title={
+                  selectedFixerPreset === 'reel-optimizer'
+                    ? useHardwareEncoder
+                      ? 'NVENC GPU active. Turn off for maximum quality tuned libx264 CPU encode.'
+                      : 'Maximum quality tuned libx264 CPU encode active. Turn on for faster NVENC GPU encode.'
+                    : undefined
+                }
+              >
                 <Cpu className="w-3.5 h-3.5 text-base-content/70" />
                 <span className="text-xs text-base-content/80">
                   {hasNvenc ? 'NVENC GPU' : 'Hardware'}

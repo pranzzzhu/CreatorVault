@@ -16,6 +16,7 @@ import {
   Pause,
   PenTool,
   Play,
+  ShieldCheck,
   Trash2,
   Volume2,
   VolumeX,
@@ -346,6 +347,35 @@ const JobCard: React.FC<{ job: JobItem }> = ({ job }) => {
 
       {job.stage === 'completed' && job.pills.length > 0 && (
         <div className="space-y-3 pt-1">
+          {job.vmafComparison && (
+            <div className="flex flex-wrap items-center gap-2.5 p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-xs">
+              <div className="flex items-center gap-1.5 font-medium text-emerald-300">
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>Compression Armor:</span>
+              </div>
+
+              <div className="flex items-center gap-2 num text-[11px]">
+                <span className="text-base-content/70">
+                  Raw Upload: <strong className="font-semibold text-base-content">{job.vmafComparison.rawScore.toFixed(1)}</strong>
+                </span>
+                <span className="text-emerald-400 font-bold">&rarr;</span>
+                <span className="text-emerald-300">
+                  Armored: <strong className="font-bold text-white">{job.vmafComparison.optimizedScore.toFixed(1)}</strong>
+                </span>
+              </div>
+
+              <span className="badge badge-xs badge-success text-[10px] font-bold num">
+                +{(job.vmafComparison.optimizedScore - job.vmafComparison.rawScore).toFixed(1)} Lift
+              </span>
+
+              {job.vmafComparison.simulatedPreviewPath && (
+                <span className="text-[10px] text-base-content/50 ml-auto num">
+                  (Simulated platform transcode: 3.5Mbps CRF 25)
+                </span>
+              )}
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-base-content/60 mr-1">
               Drag to timeline:

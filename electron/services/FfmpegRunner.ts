@@ -1,20 +1,79 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type {
   FixerJobConfig,
   JobProgressEvent,
   LocalVideoMetadata,
+  ReelOptimizerOptions,
   StemOutputPill
 } from '../../src/types/media';
 import { killProcessTree } from './BinaryManager';
 
+// Even scaled size and even pad offsets keep YUV420p chroma planes aligned (offset = trunc(x/4)*2).
+const REEL_SCALE_PAD_FILTER =
+  "scale=w='trunc(min(1080,iw*1920/ih)/2)*2':h='trunc(min(1920,ih*1080/iw)/2)*2':flags=lanczos," +
+  "pad=1080:1920:'trunc((ow-iw)/4)*2':'trunc((oh-ih)/4)*2':black";
+
 export class FfmpegRunner {
   private activeProcesses = new Map<string, ChildProcess>();
   private cancelledJobs = new Set<string>();
+  private encoderCache = new Map<string, boolean>();
+  private filterCache = new Map<string, boolean>();
 
   constructor(private getFfmpegPath: () => string, private isAvailable: () => boolean) {}
+
+  private hasEncoder(encoderName: string): boolean {
+    if (this.encoderCache.has(encoderName)) {
+      return this.encoderCache.get(encoderName)!;
+    }
+    try {
+      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-encoders'], {
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 5000
+      });
+      const available = res.status === 0 && Boolean(res.stdout && res.stdout.includes(encoderName));
+      this.encoderCache.set(encoderName, available);
+      return available;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Returns true when the file has at least one audio stream (ffmpeg -i lists streams on stderr). */
+  private hasAudioStream(filePath: string): boolean {
+    try {
+      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-i', filePath], {
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 10000
+      });
+      return /Stream #\d+:\d+.*: Audio:/.test(`${res.stderr || ''}`);
+    } catch {
+      return true;
+    }
+  }
+
+  private hasFilter(filterName: string): boolean {
+    if (this.filterCache.has(filterName)) {
+      return this.filterCache.get(filterName)!;
+    }
+    try {
+      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-filters'], {
+        windowsHide: true,
+        encoding: 'utf8',
+        timeout: 5000
+      });
+      const available = res.status === 0 && Boolean(res.stdout && res.stdout.includes(filterName));
+      this.filterCache.set(filterName, available);
+      return available;
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Ensures an audio file is 48kHz 16-bit stereo PCM WAV for Premiere Pro / After Effects timeline lock,
@@ -51,6 +110,7 @@ export class FfmpegRunner {
 
       const proc = spawn(ffmpegBin, args, { windowsHide: true });
       this.activeProcesses.set(jobId, proc);
+      proc.stdout?.resume();
 
       proc.stderr.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
@@ -292,7 +352,8 @@ export class FfmpegRunner {
   }
 
   /**
-   * Executes one of the 4 Phase 2 Video Fixer & Proxy Deck presets:
+   * Executes one of the 5 Phase 2 Video Fixer & Proxy Deck presets:
+   * - 'reel-optimizer': Social Compression Armor & IG Reel Optimizer (Lanczos 1080x1920, Rec.709, VMAF simulation)
    * - 'deflicker': LED / high-shutter deflicker + gradfun de-banding
    * - 'target-size': Exact target file size bitrate solver (NVENC VBR or 2-pass libx264)
    * - 'prores-proxy': 1080p Apple ProRes 422 Proxy (.mov) with 48kHz PCM audio
@@ -303,7 +364,15 @@ export class FfmpegRunner {
     config: FixerJobConfig,
     hasNvenc: boolean,
     onProgress: (ev: JobProgressEvent) => void
-  ): Promise<{ outputFilePath: string; pills: StemOutputPill[] }> {
+  ): Promise<{
+    outputFilePath: string;
+    pills: StemOutputPill[];
+    vmafComparison?: {
+      rawScore: number;
+      optimizedScore: number;
+      simulatedPreviewPath?: string;
+    };
+  }> {
     if (!this.isAvailable()) {
       throw new Error('FFmpeg binary is not available. Check Settings -> Sidecar Binaries.');
     }
@@ -549,6 +618,245 @@ export class FfmpegRunner {
       };
     }
 
+    if (config.preset === 'reel-optimizer') {
+      const options: ReelOptimizerOptions = config.reelOptimizer || {
+        platform: 'ig-reels',
+        targetFps: 'keep',
+        preSharpen: 'subtle',
+        denoiseGrain: true,
+        colorFixRec709: true,
+        simulateIgCompression: true
+      };
+
+      const platformTagMap: Record<string, string> = {
+        'ig-reels': 'IG_Reel',
+        'tiktok': 'TikTok',
+        'yt-shorts': 'YT_Shorts'
+      };
+      const platformTag = platformTagMap[options.platform] || 'Social';
+      const outPath = path.join(jobFolder, `${baseName}_${platformTag}_Armored.mp4`);
+
+      // 1. High-precision filter chain with safe even-dimension padding
+      const filterParts: string[] = [REEL_SCALE_PAD_FILTER];
+
+      if (options.denoiseGrain) {
+        filterParts.push('hqdn3d=1.5:1.5:3:3');
+      }
+
+      if (options.preSharpen === 'subtle') {
+        filterParts.push('unsharp=3:3:0.5:3:3:0.0');
+      } else if (options.preSharpen === 'crisp') {
+        filterParts.push('unsharp=3:3:0.85:3:3:0.0');
+      }
+
+      if (options.targetFps === '30') {
+        filterParts.push('fps=30');
+      } else if (options.targetFps === '60') {
+        filterParts.push('fps=60');
+      } else if (config.fps > 0) {
+        // 'keep' still locks CFR at the probed rate so VFR phone footage does not stay variable
+        filterParts.push(`fps=${config.fps}`);
+      }
+
+      const vfFilter = filterParts.join(',');
+
+      // 2. Video encoder args with dynamic keyframe interval and thread clamping
+      const targetFpsNum =
+        options.targetFps === '30'
+          ? 30
+          : options.targetFps === '60'
+            ? 60
+            : (config.fps || 30);
+      const keyint = Math.max(24, Math.round(targetFpsNum * 2));
+      const threadCount = Math.max(1, Math.min(os.cpus().length - 2, 8));
+      const hasX264 = this.hasEncoder('libx264');
+
+      const vEncoderArgs = useNvenc
+        ? [
+            '-c:v',
+            'h264_nvenc',
+            '-preset',
+            'p5',
+            '-rc:v',
+            'vbr',
+            '-cq',
+            '18',
+            '-b:v',
+            '0',
+            '-maxrate',
+            '12M',
+            '-bufsize',
+            '24M',
+            '-g',
+            String(keyint),
+            '-pix_fmt',
+            'yuv420p',
+            '-movflags',
+            '+faststart'
+          ]
+        : hasX264
+          ? [
+              '-c:v',
+              'libx264',
+              '-preset',
+              'slow',
+              '-profile:v',
+              'high',
+              '-level:v',
+              '4.2',
+              '-crf',
+              '18',
+              '-maxrate',
+              '12M',
+              '-bufsize',
+              '24M',
+              '-x264-params',
+              `aq-mode=3:aq-strength=0.9:deblock=-1,-1:rc-lookahead=${Math.min(60, keyint)}:keyint=${keyint}`,
+              '-threads',
+              String(threadCount),
+              '-pix_fmt',
+              'yuv420p',
+              '-movflags',
+              '+faststart'
+            ]
+          : [
+              '-c:v',
+              'h264',
+              '-crf',
+              '18',
+              '-pix_fmt',
+              'yuv420p',
+              '-movflags',
+              '+faststart'
+            ];
+
+      // 3. Rec.709 Color lock parameters
+      const colorArgs = options.colorFixRec709
+        ? [
+            '-colorspace',
+            'bt709',
+            '-color_primaries',
+            'bt709',
+            '-color_trc',
+            'bt709',
+            '-color_range',
+            'tv'
+          ]
+        : [];
+
+      // 4. Loudness normalization; skipped for silent inputs (no audio stream) and clips under 3s
+      const hasAudio = this.hasAudioStream(config.inputPath);
+      const audioArgs = !hasAudio
+        ? ['-an']
+        : safeDur >= 3
+        ? [
+            '-af',
+            'loudnorm=I=-14:TP=-1.0:LRA=11',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '320k',
+            '-ar',
+            '48000'
+          ]
+        : [
+            '-c:a',
+            'aac',
+            '-b:a',
+            '320k',
+            '-ar',
+            '48000'
+          ];
+
+      const mainEndPct = options.simulateIgCompression ? 75 : 100;
+
+      await this.runFfmpegWithProgress(
+        jobId,
+        [
+          '-y',
+          '-i',
+          config.inputPath,
+          '-vf',
+          vfFilter,
+          ...vEncoderArgs,
+          ...colorArgs,
+          ...audioArgs,
+          outPath
+        ],
+        safeDur,
+        0,
+        mainEndPct,
+        `Armoring Social 9:16 Master (${platformTag})`,
+        onProgress
+      );
+
+      let vmafComparison:
+        | { rawScore: number; optimizedScore: number; simulatedPreviewPath?: string }
+        | undefined;
+      let simulatedPreviewPath: string | undefined;
+
+      // Simulation is an optional extra: a failure never blocks the armored master.
+      if (options.simulateIgCompression) {
+        onProgress({
+          jobId,
+          stage: 'remuxing',
+          progress: 78,
+          statusMessage: 'Simulating platform compression & measuring quality retention...'
+        });
+
+        try {
+          const sim = await this.runIgCompressionSimulation(
+            jobId,
+            config.inputPath,
+            outPath,
+            jobFolder,
+            baseName,
+            safeDur,
+            onProgress
+          );
+          simulatedPreviewPath = sim.simulatedPreviewPath;
+          if (sim.rawScore !== null && sim.optimizedScore !== null) {
+            vmafComparison = {
+              rawScore: sim.rawScore,
+              optimizedScore: sim.optimizedScore,
+              simulatedPreviewPath
+            };
+          }
+        } catch (simErr) {
+          if (/cancel/i.test((simErr as Error).message ?? '')) {
+            throw simErr;
+          }
+          console.warn('Simulation failed; delivering armored master without quality badge:', simErr);
+        }
+      }
+
+      const pills: StemOutputPill[] = [
+        {
+          id: 'fixer_reel_optimizer',
+          label: `${platformTag}_Armored.mp4`,
+          type: 'video',
+          filePath: outPath,
+          fileName: path.basename(outPath)
+        }
+      ];
+
+      if (simulatedPreviewPath && fs.existsSync(simulatedPreviewPath)) {
+        pills.push({
+          id: 'fixer_sim_preview',
+          label: 'Simulated_IG_Constrained.mp4',
+          type: 'video',
+          filePath: simulatedPreviewPath,
+          fileName: path.basename(simulatedPreviewPath)
+        });
+      }
+
+      return {
+        outputFilePath: outPath,
+        pills,
+        vmafComparison
+      };
+    }
+
     // Preset: 'silence-xml' (Dead-Air Silence Chopper -> Premiere Pro FCP7 XML + Jump-Cut Preview MP4)
     const xmlPath = path.join(jobFolder, `${baseName}_Premiere_Cuts.xml`);
     const jumpCutPath = path.join(jobFolder, `${baseName}_JumpCut.mp4`);
@@ -648,6 +956,7 @@ export class FfmpegRunner {
     return new Promise<void>((resolve, reject) => {
       const proc = spawn(ffmpegBin, args, { windowsHide: true });
       this.activeProcesses.set(jobId, proc);
+      proc.stdout?.resume();
 
       let stderrTail = '';
 
@@ -725,6 +1034,7 @@ export class FfmpegRunner {
 
       const proc = spawn(ffmpegBin, args, { windowsHide: true });
       this.activeProcesses.set(jobId, proc);
+      proc.stdout?.resume();
 
       let fullLog = '';
 
@@ -998,5 +1308,270 @@ export class FfmpegRunner {
     }
 
     fs.writeFileSync(targetPath, buffer);
+  }
+
+  /**
+   * Simulates constrained Instagram / TikTok server-side recompression (3.5Mbps cap, fast CRF 25)
+   * on a 5-second slice of both the armored master and the raw upload. Both compressed slices are
+   * scored against the same original source (scaled to 1080x1920) with VMAF, or SSIM if libvmaf is absent.
+   * Scores are null when no metric filter is available.
+   */
+  private async runIgCompressionSimulation(
+    jobId: string,
+    rawInputPath: string,
+    armoredOutputPath: string,
+    jobFolder: string,
+    baseName: string,
+    durationSec: number,
+    onProgress: (ev: JobProgressEvent) => void
+  ): Promise<{ rawScore: number | null; optimizedScore: number | null; simulatedPreviewPath?: string }> {
+    const sliceDur = Math.min(5, Math.max(1, durationSec));
+    const sliceStart = Math.max(0, (durationSec - sliceDur) / 2);
+
+    const simPreviewPath = path.join(jobFolder, `${baseName}_IG_Simulated_Preview.mp4`);
+    const rawSimPath = path.join(jobFolder, `${baseName}_temp_raw_sim.mp4`);
+    const simEncoder = this.hasEncoder('libx264') ? 'libx264' : 'h264';
+    const constrainedArgs = [
+      '-c:v',
+      simEncoder,
+      '-preset',
+      'fast',
+      '-crf',
+      '25',
+      '-maxrate',
+      '3.5M',
+      '-bufsize',
+      '7M',
+      '-pix_fmt',
+      'yuv420p'
+    ];
+    const slice = ['-ss', sliceStart.toFixed(2), '-t', sliceDur.toFixed(2)];
+
+    // 1. Constrained transcode of the armored master
+    await this.runProcessAsync(jobId, [
+      '-y',
+      ...slice,
+      '-i',
+      armoredOutputPath,
+      ...constrainedArgs,
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      simPreviewPath
+    ]);
+
+    onProgress({
+      jobId,
+      stage: 'remuxing',
+      progress: 84,
+      statusMessage: 'Measuring armored quality retention (VMAF/SSIM)...'
+    });
+
+    // 2. Armored score vs original source
+    const optimizedScore = await this.measureQualityScore(
+      jobId,
+      simPreviewPath,
+      rawInputPath,
+      sliceStart,
+      sliceDur,
+      REEL_SCALE_PAD_FILTER
+    );
+
+    onProgress({
+      jobId,
+      stage: 'remuxing',
+      progress: 90,
+      statusMessage: 'Simulating raw video constrained upload transcode...'
+    });
+
+    let rawScore: number | null = null;
+    try {
+      // 3. Constrained transcode of the raw source (scaled to 1080x1920)
+      await this.runProcessAsync(jobId, [
+        '-y',
+        ...slice,
+        '-i',
+        rawInputPath,
+        '-vf',
+        REEL_SCALE_PAD_FILTER,
+        ...constrainedArgs,
+        '-an',
+        rawSimPath
+      ]);
+
+      onProgress({
+        jobId,
+        stage: 'remuxing',
+        progress: 96,
+        statusMessage: 'Measuring raw baseline retention score...'
+      });
+
+      // 4. Raw score vs original source
+      rawScore = await this.measureQualityScore(
+        jobId,
+        rawSimPath,
+        rawInputPath,
+        sliceStart,
+        sliceDur,
+        REEL_SCALE_PAD_FILTER
+      );
+    } finally {
+      try {
+        if (fs.existsSync(rawSimPath)) {
+          fs.unlinkSync(rawSimPath);
+        }
+      } catch {
+        // Ignore cleanup error
+      }
+    }
+
+    return {
+      rawScore: rawScore === null ? null : Number(rawScore.toFixed(1)),
+      optimizedScore: optimizedScore === null ? null : Number(optimizedScore.toFixed(1)),
+      simulatedPreviewPath: fs.existsSync(simPreviewPath) ? simPreviewPath : undefined
+    };
+  }
+
+  /**
+   * Computes perceptual quality score (0-100) using libvmaf or ssim fallback.
+   */
+  private async measureQualityScore(
+    jobId: string,
+    simPath: string,
+    refPath: string,
+    sliceStart: number,
+    sliceDur: number,
+    refFilter?: string
+  ): Promise<number | null> {
+    const hasVmaf = this.hasFilter('libvmaf');
+    const hasSsim = this.hasFilter('ssim');
+
+    // Attempt 1: libvmaf
+    if (hasVmaf) {
+      try {
+        const filterComplex = refFilter
+          ? `[1:v]${refFilter}[ref];[0:v][ref]libvmaf`
+          : '[0:v][1:v]libvmaf';
+
+        const args = [
+          '-i',
+          simPath,
+          '-ss',
+          sliceStart.toFixed(2),
+          '-t',
+          sliceDur.toFixed(2),
+          '-i',
+          refPath,
+          '-filter_complex',
+          filterComplex,
+          '-f',
+          'null',
+          process.platform === 'win32' ? 'NUL' : '/dev/null'
+        ];
+
+        const output = await this.runProcessAsync(jobId, args);
+        const match = output.match(/VMAF score:\s*([0-9.]+)/i);
+        if (match) {
+          const val = parseFloat(match[1]);
+          if (Number.isFinite(val) && val > 0) {
+            return Math.min(100, Math.max(0, val));
+          }
+        }
+      } catch (err) {
+        if (/cancel/i.test((err as Error).message ?? '')) throw err;
+        // Fall back to SSIM
+      }
+    }
+
+    // Attempt 2: ssim
+    if (hasSsim) {
+      try {
+        const filterComplex = refFilter
+          ? `[1:v]${refFilter}[ref];[0:v][ref]ssim`
+          : '[0:v][1:v]ssim';
+
+        const args = [
+          '-i',
+          simPath,
+          '-ss',
+          sliceStart.toFixed(2),
+          '-t',
+          sliceDur.toFixed(2),
+          '-i',
+          refPath,
+          '-filter_complex',
+          filterComplex,
+          '-f',
+          'null',
+          process.platform === 'win32' ? 'NUL' : '/dev/null'
+        ];
+
+        const output = await this.runProcessAsync(jobId, args);
+        const match = output.match(/SSIM.*?All:([0-9.]+)/i) || output.match(/SSIM.*?Y:([0-9.]+)/i);
+        if (match) {
+          const ssimVal = parseFloat(match[1]);
+          if (Number.isFinite(ssimVal) && ssimVal > 0) {
+            // Convert SSIM (0-1) to 0-100 perceptual retention score
+            const perceptual = Math.min(99.0, Math.max(20.0, ssimVal * 100));
+            return Number(perceptual.toFixed(1));
+          }
+        }
+      } catch (err) {
+        if (/cancel/i.test((err as Error).message ?? '')) throw err;
+        // Fall back to null
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Spawns an internal FFmpeg utility worker and drains stdout to prevent 64KB pipe stall.
+   */
+  private runProcessAsync(jobId: string, args: string[]): Promise<string> {
+    const ffmpegBin = this.getFfmpegPath();
+
+    return new Promise<string>((resolve, reject) => {
+      const proc = spawn(ffmpegBin, args, { windowsHide: true });
+      this.activeProcesses.set(jobId, proc);
+
+      // Drain stdout immediately (critical: prevents 64KB pipe stall)
+      proc.stdout?.resume();
+
+      let fullStderr = '';
+
+      proc.stderr.on('data', (chunk: Buffer) => {
+        fullStderr += chunk.toString();
+        if (fullStderr.length > 32768) {
+          fullStderr = fullStderr.slice(-16384);
+        }
+      });
+
+      proc.on('error', (err) => {
+        this.activeProcesses.delete(jobId);
+        if (this.cancelledJobs.has(jobId)) {
+          this.cancelledJobs.delete(jobId);
+          reject(new Error('Job cancelled by user'));
+          return;
+        }
+        reject(err);
+      });
+
+      proc.on('close', (code) => {
+        this.activeProcesses.delete(jobId);
+        if (this.cancelledJobs.has(jobId)) {
+          this.cancelledJobs.delete(jobId);
+          reject(new Error('Job cancelled by user'));
+          return;
+        }
+        if (code === 0) {
+          resolve(fullStderr);
+        } else {
+          const lastLine = fullStderr.trim().split(/\r?\n/).pop() || `Process exited with code ${code}`;
+          reject(new Error(lastLine));
+        }
+      });
+    });
   }
 }

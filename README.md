@@ -5,12 +5,14 @@
 **The Local-First Creator Media Engine**  
 *Stacher7 meets Raycast for Video Editors, Music Producers, and Motion Designers*
 
+[![Release](https://img.shields.io/badge/Release-v0.1.1-3B82F6?style=flat-square&logo=github)](https://github.com/pranzzzhu/CreatorVault/releases)
 [![Electron](https://img.shields.io/badge/Electron-45-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-7.0-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-4.0-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
 [![CUDA](https://img.shields.io/badge/GPU_Acceleration-NVIDIA_CUDA_%2F_NVENC-76B900?style=flat-square&logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-zone)
 [![License: MIT](https://img.shields.io/badge/License-MIT-10B981?style=flat-square)](./LICENSE)
+[![Changelog](https://img.shields.io/badge/Changelog-v0.1.1-10B981?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -34,7 +36,8 @@ Every completed clip, isolated audio stem, Premiere Pro XML timeline, SVG vector
 - **Browser Cookie Bypass:** Optional 1-click `--cookies-from-browser` pass-through (`Chrome`, `Brave`, `Edge`, `Firefox`) for age-restricted or member-only streams.
 
 ### 2. 🎞️ FFmpeg Video Fixer & Proxy Deck (Module 2)
-Drop local camera footage (`.mp4`, `.mov`, `.mkv`, `.mxf`, `.webm`) to probe stream metadata via `ffprobe` and run four specialized pipelines:
+Drop local camera footage (`.mp4`, `.mov`, `.mkv`, `.mxf`, `.webm`) to probe stream metadata via `ffprobe` and run five specialized pipelines:
+- **Social Compression Armor & IG Reel Optimizer (`reel-optimizer`):** Pre-compensates for aggressive platform re-compression across Instagram Reels, TikTok, and YouTube Shorts. Applies 1080×1920 9:16 Lanczos scaling with centering, temporal grain denoising (`hqdn3d`), unsharp pre-emphasis (`unsharp=3:3:0.5|0.85`), CFR lock (`fps=30|60`), broadcast master `libx264` encoding (slow preset, CRF 18, 12M maxrate, tuned AQ mode and GOP keyint lock), Rec.709 color space lock (`bt709 tv`, SDR sources only), and EBU R128 audio normalization (`loudnorm=I=-14:TP=-1.0`, skipped on silent clips). Optional constrained platform upload simulator scores both the raw and armored uploads against the original source with VMAF (SSIM fallback); no badge is shown if neither metric is available.
 - **LED Deflicker & De-Band:** Eliminates high-shutter rolling banding and PWM studio lighting flicker using temporal predictive-mean filtering (`deflicker=mode=pm:size=5|7|11,gradfun=strength=1.2:radius=8`).
 - **Exact Target Size Compressor (`8MB`–`100MB`):** Solves exact video/audio bitrates from `ffprobe` duration (`(targetMB * 8192 * 0.94) / duration - 128`) using `h264_nvenc` VBR or isolated 2-pass `libx264` so exports always fit Discord, WhatsApp, or client review caps.
 - **Dead-Air Silence Chopper $\rightarrow$ Premiere XML:** Scans dialogue via `silencedetect` and exports both a non-destructive Final Cut Pro 7 / Premiere Pro / DaVinci Resolve `xmeml version="5"` `.xml` cut list (with NTSC fractional frame-rate detection) and a jump-cut preview `.mp4`.
@@ -115,7 +118,7 @@ CreatorVault/
 │   │   │   ├── TimeRangeSlider.tsx    # Dual-handle visual In/Out timestamp trimmer
 │   │   │   └── JobQueueList.tsx       # Live progress cards, draggable NLE pills & Stem Audio Mixer
 │   │   ├── fixer/
-│   │   │   └── FixerModuleView.tsx    # Phase 2 video dropzone, 4 fixer presets & parameter controls
+│   │   │   └── FixerModuleView.tsx    # Phase 2 video dropzone, 5 fixer presets & parameter controls
 │   │   └── vectorizer/
 │   │       └── VectorizerModuleView.tsx # Phase 3 image dropzone, 3 AI tools & Before/After Inspector
 │   ├── store/
@@ -167,6 +170,9 @@ npx tsc --noEmit
 
 # Build production renderer & Electron bundles
 npm run build
+
+# Package Windows standalone distribution (release/win-unpacked/Vortex.exe)
+npm run dist:win
 ```
 
 ---
