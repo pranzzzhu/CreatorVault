@@ -4,6 +4,7 @@ import {
   dialog,
   ipcMain,
   nativeImage,
+  nativeTheme,
   net,
   protocol,
   shell
@@ -21,6 +22,7 @@ import { VectorRunner } from './services/VectorRunner';
 import type {
   BinaryName,
   BrowserSource,
+  ConverterJobConfig,
   FixerJobConfig,
   JobConfig,
   JobProgressEvent,
@@ -114,6 +116,7 @@ const DRAG_ICON_DATA_URL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAABNSURBVHgB7dYxDQAACANB9l96F3gQ4J3cT0J2524B2A0gIIAAG0BAAAHeAAICCLABBMR7A0BAAAG2gIAAArwBAgIIsAEEBBDgD3gB+8YHhX198cQAAAAASUVORK5CYII=';
 
 function createWindow() {
+  const isDark = nativeTheme.shouldUseDarkColors;
   mainWindow = new BrowserWindow({
     width: 1260,
     height: 840,
@@ -121,11 +124,11 @@ function createWindow() {
     minHeight: 700,
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#050505',
-      symbolColor: '#A1A1AA',
+      color: isDark ? '#050505' : '#fafafa',
+      symbolColor: isDark ? '#A1A1AA' : '#27272a',
       height: 36
     },
-    backgroundColor: '#050505',
+    backgroundColor: isDark ? '#050505' : '#fafafa',
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       nodeIntegration: false,
@@ -147,7 +150,16 @@ app.whenReady().then(() => {
       request.url.replace(/^vortex-media:\/\/local\//i, '').split('?')[0]
     );
     const normalizedPath = path.resolve(rawPath);
-    if (!fs.existsSync(normalizedPath)) {
+    const allowedExts = new Set([
+      '.mp4', '.mov', '.mkv', '.webm', '.avi', '.mxf', '.m4v', '.mts', '.gif',
+      '.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.opus',
+      '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.svg', '.xml'
+    ]);
+    const ext = path.extname(normalizedPath).toLowerCase();
+    if (!allowedExts.has(ext)) {
+      return new Response('Access denied: unapproved media extension', { status: 403 });
+    }
+    if (!fs.existsSync(normalizedPath) || !fs.statSync(normalizedPath).isFile()) {
       return new Response('Media file not found', { status: 404 });
     }
     return net.fetch(pathToFileURL(normalizedPath).toString());
@@ -207,6 +219,21 @@ ipcMain.handle('window:control', (_event, action: 'minimize' | 'maximize' | 'clo
   }
 });
 
+ipcMain.handle('window:set-theme', (_event, theme: string) => {
+  if (!mainWindow) return;
+  const isLight = theme === 'antigravity-light' || theme === 'light';
+  try {
+    nativeTheme.themeSource = isLight ? 'light' : 'dark';
+    mainWindow.setTitleBarOverlay({
+      color: isLight ? '#fafafa' : '#050505',
+      symbolColor: isLight ? '#27272a' : '#A1A1AA',
+      height: 36
+    });
+  } catch {
+    // Unsupported platform or window destroyed
+  }
+});
+
 ipcMain.handle('window:set-zoom', (event, factor: number) => {
   const clamped = Math.min(1.5, Math.max(0.75, Math.round(factor * 100) / 100));
   event.sender.setZoomFactor(clamped);
@@ -217,11 +244,17 @@ ipcMain.handle('window:get-zoom', (event) => {
   return Math.round(event.sender.getZoomFactor() * 100) / 100;
 });
 
-ipcMain.handle('dialog:select-dir', async () => {
+ipcMain.handle('dialog:select-dir', async (_event, currentDir?: string) => {
   if (!mainWindow) return null;
+  const isValidDir =
+    currentDir &&
+    typeof currentDir === 'string' &&
+    fs.existsSync(currentDir) &&
+    fs.statSync(currentDir).isDirectory();
+  const startPath = isValidDir ? currentDir : getDefaultOutputDir();
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select Vortex Export Directory',
-    defaultPath: getDefaultOutputDir(),
+    title: 'Choose Save Folder',
+    defaultPath: startPath,
     properties: ['openDirectory', 'createDirectory']
   });
   if (res.canceled || res.filePaths.length === 0) return null;
@@ -264,61 +297,98 @@ ipcMain.handle(
   }
 );
 
+let errorResetTimer: NodeJS.Timeout | null = null;
+
+function updateWindowTaskbarProgress(progressPayload: JobProgressEvent) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (errorResetTimer) {
+    clearTimeout(errorResetTimer);
+    errorResetTimer = null;
+  }
+
+  if (progressPayload.stage === 'completed') {
+    mainWindow.setProgressBar(-1);
+  } else if (progressPayload.stage === 'error') {
+    mainWindow.setProgressBar(1, { mode: 'error' });
+    errorResetTimer = setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+      errorResetTimer = null;
+    }, 2500);
+  } else {
+    const rawProgress = progressPayload.progress ?? 5;
+    const ratio = Math.min(0.99, Math.max(0.05, rawProgress / 100));
+    mainWindow.setProgressBar(ratio, { mode: 'normal' });
+  }
+}
+
 ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
   const emitProgress = (progressPayload: JobProgressEvent) => {
+    updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
   };
 
-  // Stage 1: Download & Clip via yt-dlp
-  const dlResult = await ytDlpRunner.executeDownload(jobId, config, emitProgress);
-  const isAudioOnly = config.quality === 'audio-wav' || config.quality === 'audio-mp3';
+  try {
+    // Stage 1: Download & Clip via yt-dlp
+    const dlResult = await ytDlpRunner.executeDownload(jobId, config, emitProgress);
+    const isAudioOnly = config.quality === 'audio-wav' || config.quality === 'audio-mp3';
 
-  // Stage 2: Optional AI Stem Separation via Demucs
-  if (config.stemMode !== 'off') {
-    const stemResult = await stemRunner.separateStems(
-      jobId,
-      dlResult.outputFilePath,
-      config,
-      emitProgress
-    );
+    // Stage 2: Optional AI Stem Separation via Demucs
+    if (config.stemMode !== 'off') {
+      const stemResult = await stemRunner.separateStems(
+        jobId,
+        dlResult.outputFilePath,
+        config,
+        emitProgress
+      );
+
+      emitProgress({
+        jobId,
+        stage: 'completed',
+        progress: 100,
+        statusMessage: 'Ready — Drag stems to timeline'
+      });
+
+      return {
+        outputFilePath: dlResult.outputFilePath,
+        pills: stemResult.pills,
+        usedSimulation: dlResult.usedSimulation || stemResult.usedSimulation
+      };
+    }
+
+    // Single output pill when stem separation is off
+    const pills: StemOutputPill[] = [
+      {
+        id: 'master',
+        label: isAudioOnly ? 'Audio_Master.wav' : 'Full_Clip.mp4',
+        type: isAudioOnly ? 'audio' : 'video',
+        filePath: dlResult.outputFilePath,
+        fileName: path.basename(dlResult.outputFilePath)
+      }
+    ];
 
     emitProgress({
       jobId,
       stage: 'completed',
       progress: 100,
-      statusMessage: 'Ready — Drag stems to timeline'
+      statusMessage: 'Ready — Drag clip to timeline'
     });
 
     return {
       outputFilePath: dlResult.outputFilePath,
-      pills: stemResult.pills,
-      usedSimulation: dlResult.usedSimulation || stemResult.usedSimulation
+      pills,
+      usedSimulation: dlResult.usedSimulation
     };
+  } catch (err) {
+    updateWindowTaskbarProgress({
+      jobId,
+      stage: 'error',
+      progress: 100,
+      statusMessage: (err as Error).message || 'Download failed'
+    });
+    throw err;
   }
-
-  // Single output pill when stem separation is off
-  const pills: StemOutputPill[] = [
-    {
-      id: 'master',
-      label: isAudioOnly ? 'Audio_Master.wav' : 'Full_Clip.mp4',
-      type: isAudioOnly ? 'audio' : 'video',
-      filePath: dlResult.outputFilePath,
-      fileName: path.basename(dlResult.outputFilePath)
-    }
-  ];
-
-  emitProgress({
-    jobId,
-    stage: 'completed',
-    progress: 100,
-    statusMessage: 'Ready — Drag clip to timeline'
-  });
-
-  return {
-    outputFilePath: dlResult.outputFilePath,
-    pills,
-    usedSimulation: dlResult.usedSimulation
-  };
 });
 
 ipcMain.handle('job:cancel', (_event, jobId: string) => {
@@ -326,6 +396,13 @@ ipcMain.handle('job:cancel', (_event, jobId: string) => {
   const c2 = stemRunner.cancelJob(jobId);
   const c3 = ffmpegRunner.cancelJob(jobId);
   const c4 = vectorRunner.cancelJob(jobId);
+  if (errorResetTimer) {
+    clearTimeout(errorResetTimer);
+    errorResetTimer = null;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setProgressBar(-1);
+  }
   return c1 || c2 || c3 || c4;
 });
 
@@ -359,24 +436,35 @@ ipcMain.handle('fixer:probe', (_event, filePath: string) => {
 
 ipcMain.handle('fixer:start', async (event, jobId: string, config: FixerJobConfig) => {
   const emitProgress = (progressPayload: JobProgressEvent) => {
+    updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
   };
 
-  const result = await ffmpegRunner.executeFixerJob(
-    jobId,
-    config,
-    cachedHardware.hasNvenc,
-    emitProgress
-  );
+  try {
+    const result = await ffmpegRunner.executeFixerJob(
+      jobId,
+      config,
+      cachedHardware.hasNvenc,
+      emitProgress
+    );
 
-  emitProgress({
-    jobId,
-    stage: 'completed',
-    progress: 100,
-    statusMessage: 'Ready — Drag processed media to timeline'
-  });
+    emitProgress({
+      jobId,
+      stage: 'completed',
+      progress: 100,
+      statusMessage: 'Ready — Drag processed media to timeline'
+    });
 
-  return result;
+    return result;
+  } catch (err) {
+    updateWindowTaskbarProgress({
+      jobId,
+      stage: 'error',
+      progress: 100,
+      statusMessage: (err as Error).message || 'Fixer job failed'
+    });
+    throw err;
+  }
 });
 
 // ============================================================================
@@ -405,17 +493,94 @@ ipcMain.handle('vector:probe', (_event, filePath: string) => {
 
 ipcMain.handle('vector:start', async (event, jobId: string, config: VectorJobConfig) => {
   const emitProgress = (progressPayload: JobProgressEvent) => {
+    updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
   };
 
-  const result = await vectorRunner.executeVectorJob(jobId, config, emitProgress);
+  try {
+    const result = await vectorRunner.executeVectorJob(jobId, config, emitProgress);
 
-  emitProgress({
-    jobId,
-    stage: 'completed',
-    progress: 100,
-    statusMessage: 'Ready — Drag vector or image asset to canvas'
+    emitProgress({
+      jobId,
+      stage: 'completed',
+      progress: 100,
+      statusMessage: 'Ready — Drag vector or image asset to canvas'
+    });
+
+    return result;
+  } catch (err) {
+    updateWindowTaskbarProgress({
+      jobId,
+      stage: 'error',
+      progress: 100,
+      statusMessage: (err as Error).message || 'Vector job failed'
+    });
+    throw err;
+  }
+});
+
+// ============================================================================
+// PHASE 4: UNIVERSAL FORMAT CONVERTER IPC HANDLERS
+// ============================================================================
+
+ipcMain.handle('dialog:select-media-files', async () => {
+  if (!mainWindow) return [];
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Video or Audio Files to Convert',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      {
+        name: 'All Video & Audio Media',
+        extensions: [
+          'mp4', 'mov', 'mkv', 'webm', 'avi', 'mxf', 'm4v', 'mts', 'gif',
+          'wav', 'mp3', 'flac', 'm4a', 'ogg', 'aac', 'opus', 'wma'
+        ]
+      }
+    ]
   });
+  if (res.canceled || res.filePaths.length === 0) return [];
+  return res.filePaths;
+});
 
-  return result;
+ipcMain.handle('converter:probe', (_event, filePath: string) => {
+  return ffmpegRunner.probeLocalMedia(
+    filePath,
+    binaryManager.getBinaryPath('ffprobe'),
+    binaryManager.isBinaryAvailable('ffprobe')
+  );
+});
+
+ipcMain.handle('converter:start', async (event, jobId: string, config: ConverterJobConfig) => {
+  const emitProgress = (progressPayload: JobProgressEvent) => {
+    updateWindowTaskbarProgress(progressPayload);
+    event.sender.send('job:progress', progressPayload);
+  };
+
+  try {
+    const result = await ffmpegRunner.executeConverterJob(
+      jobId,
+      config,
+      cachedHardware.hasNvenc,
+      emitProgress
+    );
+
+    emitProgress({
+      jobId,
+      stage: 'completed',
+      progress: 100,
+      statusMessage: result.usedSmartCopy
+        ? 'Ready — Instant Zero-Loss Remux Complete'
+        : 'Ready — Drag converted media to timeline'
+    });
+
+    return result;
+  } catch (err) {
+    updateWindowTaskbarProgress({
+      jobId,
+      stage: 'error',
+      progress: 100,
+      statusMessage: (err as Error).message || 'Converter job failed'
+    });
+    throw err;
+  }
 });

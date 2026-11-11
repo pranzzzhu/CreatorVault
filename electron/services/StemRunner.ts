@@ -71,115 +71,139 @@ export class StemRunner {
 
     // Extract 48kHz 16-bit stereo PCM WAV from video container before feeding Demucs (CB-5)
     let demucsInputPath = inputMediaPath;
-    if (path.extname(inputMediaPath).toLowerCase() !== '.wav') {
-      const normalizedWavPath = path.join(
-        jobFolder,
-        `${path.parse(inputMediaPath).name}_48k.wav`
-      );
-      const clipDur = config.trimEnabled
-        ? Math.max(2, config.endTime - config.startTime)
-        : config.duration || 30;
-      demucsInputPath = await this.ffmpegRunner.extractOrNormalizeWav(
-        inputMediaPath,
-        normalizedWavPath,
-        clipDur,
-        jobId,
-        onProgress
-      );
-    }
 
-    if (!this.isDemucsAvailable()) {
-      if (!config.simulateIfMissingBinary) {
-        throw new Error(
-          'Demucs AI Stem engine is not installed. Run `pip install -U demucs` or enable Simulation Fallback.'
+    const cleanupTempWav = () => {
+      if (demucsInputPath !== inputMediaPath && fs.existsSync(demucsInputPath)) {
+        try {
+          fs.unlinkSync(demucsInputPath);
+        } catch {
+          // Ignore unlink errors
+        }
+      }
+    };
+
+    try {
+      if (path.extname(inputMediaPath).toLowerCase() !== '.wav') {
+        const normalizedWavPath = path.join(
+          jobFolder,
+          `${path.parse(inputMediaPath).name}_48k.wav`
+        );
+        const clipDur = config.trimEnabled
+          ? Math.max(2, config.endTime - config.startTime)
+          : config.duration || 30;
+        demucsInputPath = await this.ffmpegRunner.extractOrNormalizeWav(
+          inputMediaPath,
+          normalizedWavPath,
+          clipDur,
+          jobId,
+          onProgress
         );
       }
-      return this.runSimulatedStems(jobId, inputMediaPath, demucsInputPath, stemsOutDir, config, deviceLabel, onProgress);
+
+      if (!this.isDemucsAvailable()) {
+        if (!config.simulateIfMissingBinary) {
+          throw new Error(
+            'Demucs AI Stem engine is not installed. Run `pip install -U demucs` or enable Simulation Fallback.'
+          );
+        }
+        return await this.runSimulatedStems(
+          jobId,
+          inputMediaPath,
+          demucsInputPath,
+          stemsOutDir,
+          config,
+          deviceLabel,
+          onProgress
+        );
+      }
+
+      const pythonBin = this.getPythonPath();
+      const args = ['-m', 'demucs.separate', '-n', 'htdemucs', '-d', device];
+
+      if (config.stemMode === '2-stem') {
+        args.push('--two-stems=vocals');
+      }
+
+      args.push('--out', stemsOutDir, demucsInputPath);
+
+      onProgress({
+        jobId,
+        stage: 'separating_stems',
+        progress: 52,
+        statusMessage: `Initializing Demucs htdemucs on ${deviceLabel}...`
+      });
+
+      return await new Promise<{ pills: StemOutputPill[]; usedSimulation: boolean }>((resolve, reject) => {
+        const proc = spawn(pythonBin, args, { windowsHide: true });
+        this.activeProcesses.set(jobId, proc);
+
+        let stderrText = '';
+
+        const parseDemucsProgress = (text: string) => {
+          // Matches tqdm output like " 45%|████▌     | 18/40" or "45%"
+          const matches = [...text.matchAll(/(\d{1,3})%\|/g)];
+          if (matches.length > 0) {
+            const lastMatch = matches[matches.length - 1];
+            const pct = Math.min(100, Math.max(0, parseInt(lastMatch[1], 10)));
+            const overallProgress = 50 + Math.round(pct * 0.5);
+            onProgress({
+              jobId,
+              stage: 'separating_stems',
+              progress: overallProgress,
+              statusMessage: `Separating Stems on ${deviceLabel} (${pct}%)...`
+            });
+          }
+        };
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+          parseDemucsProgress(chunk.toString());
+        });
+
+        proc.stderr.on('data', (chunk: Buffer) => {
+          const str = chunk.toString();
+          stderrText += str;
+          parseDemucsProgress(str);
+        });
+
+        proc.on('error', (err) => {
+          this.activeProcesses.delete(jobId);
+          if (this.cancelledJobs.has(jobId)) {
+            this.cancelledJobs.delete(jobId);
+            reject(new Error('Job cancelled by user'));
+            return;
+          }
+          if (!this.isDemucsAvailable() && config.simulateIfMissingBinary) {
+            this.runSimulatedStems(jobId, inputMediaPath, demucsInputPath, stemsOutDir, config, deviceLabel, onProgress)
+              .then(resolve)
+              .catch(reject);
+          } else {
+            reject(err);
+          }
+        });
+
+        proc.on('close', (code) => {
+          this.activeProcesses.delete(jobId);
+
+          if (this.cancelledJobs.has(jobId)) {
+            this.cancelledJobs.delete(jobId);
+            reject(new Error('Job cancelled by user'));
+            return;
+          }
+
+          if (code === 0) {
+            const trackFolderName = path.parse(demucsInputPath).name;
+            const htdemucsDir = path.join(stemsOutDir, 'htdemucs', trackFolderName);
+            const pills = this.collectStemPills(inputMediaPath, htdemucsDir, config);
+            resolve({ pills, usedSimulation: false });
+          } else {
+            const cleanErr = stderrText.trim().slice(-600) || `Demucs exited with code ${code}`;
+            reject(new Error(cleanErr));
+          }
+        });
+      });
+    } finally {
+      cleanupTempWav();
     }
-
-    const pythonBin = this.getPythonPath();
-    const args = ['-m', 'demucs.separate', '-n', 'htdemucs', '-d', device];
-
-    if (config.stemMode === '2-stem') {
-      args.push('--two-stems=vocals');
-    }
-
-    args.push('--out', stemsOutDir, demucsInputPath);
-
-    onProgress({
-      jobId,
-      stage: 'separating_stems',
-      progress: 52,
-      statusMessage: `Initializing Demucs htdemucs on ${deviceLabel}...`
-    });
-
-    return new Promise<{ pills: StemOutputPill[]; usedSimulation: boolean }>((resolve, reject) => {
-      const proc = spawn(pythonBin, args, { windowsHide: true });
-      this.activeProcesses.set(jobId, proc);
-
-      let stderrText = '';
-
-      const parseDemucsProgress = (text: string) => {
-        // Matches tqdm output like " 45%|████▌     | 18/40" or "45%"
-        const matches = [...text.matchAll(/(\d{1,3})%\|/g)];
-        if (matches.length > 0) {
-          const lastMatch = matches[matches.length - 1];
-          const pct = Math.min(100, Math.max(0, parseInt(lastMatch[1], 10)));
-          const overallProgress = 50 + Math.round(pct * 0.5);
-          onProgress({
-            jobId,
-            stage: 'separating_stems',
-            progress: overallProgress,
-            statusMessage: `Separating Stems on ${deviceLabel} (${pct}%)...`
-          });
-        }
-      };
-
-      proc.stdout.on('data', (chunk: Buffer) => {
-        parseDemucsProgress(chunk.toString());
-      });
-
-      proc.stderr.on('data', (chunk: Buffer) => {
-        const str = chunk.toString();
-        stderrText += str;
-        parseDemucsProgress(str);
-      });
-
-      proc.on('error', (err) => {
-        this.activeProcesses.delete(jobId);
-        if (this.cancelledJobs.has(jobId)) {
-          this.cancelledJobs.delete(jobId);
-          reject(new Error('Job cancelled by user'));
-          return;
-        }
-        if (!this.isDemucsAvailable() && config.simulateIfMissingBinary) {
-          this.runSimulatedStems(jobId, inputMediaPath, demucsInputPath, stemsOutDir, config, deviceLabel, onProgress)
-            .then(resolve)
-            .catch(reject);
-        } else {
-          reject(err);
-        }
-      });
-
-      proc.on('close', (code) => {
-        this.activeProcesses.delete(jobId);
-
-        if (this.cancelledJobs.has(jobId)) {
-          this.cancelledJobs.delete(jobId);
-          reject(new Error('Job cancelled by user'));
-          return;
-        }
-
-        if (code === 0) {
-          const trackFolderName = path.parse(demucsInputPath).name;
-          const htdemucsDir = path.join(stemsOutDir, 'htdemucs', trackFolderName);
-          const pills = this.collectStemPills(inputMediaPath, htdemucsDir, config);
-          resolve({ pills, usedSimulation: false });
-        } else {
-          reject(new Error(stderrText.trim() || `Demucs exited with code ${code}`));
-        }
-      });
-    });
   }
 
   private collectStemPills(

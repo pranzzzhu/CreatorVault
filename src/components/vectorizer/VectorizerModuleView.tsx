@@ -25,23 +25,23 @@ const VECTOR_TOOLS: Array<{
 }> = [
   {
     id: 'vtracer',
-    title: 'Raster-to-SVG Vectorizer',
-    badge: 'vtracer 0.6.15 (Rust Spline)',
-    desc: 'Converts flat logos, icons, sketches, and typography into clean, editable SVG Bézier spline geometry for Illustrator, Figma, and After Effects.',
+    title: 'Turn Image into Vector (SVG)',
+    badge: 'Clean scalable shapes',
+    desc: 'Turns flat PNG/JPG logos, icons, and sketches into editable SVG vector shapes for Illustrator, Figma, or After Effects.',
     icon: PenTool
   },
   {
     id: 'rmbg',
-    title: 'Studio Background Remover',
-    badge: 'rembg 2.0 (U2Net ONNX)',
-    desc: 'Extracts subjects from complex outdoor, portrait, and product photos into a 32-bit transparent PNG alpha matte using U2Net ONNX segmentation.',
+    title: 'Remove Background',
+    badge: 'Transparent PNG cutout',
+    desc: 'Automatically cuts out people, products, or logos onto a clean transparent background in about a second.',
     icon: Eraser
   },
   {
     id: 'esrgan',
-    title: 'Super-Resolution Asset Upscaler',
-    badge: 'Real-ESRGAN x4plus (CUDA)',
-    desc: 'Restores low-resolution textures, UI assets, and archival stills at 2x or 4x resolution using Real-ESRGAN neural weights on GPU.',
+    title: 'AI Image Upscaler (2x / 4x)',
+    badge: 'Sharpen & boost resolution',
+    desc: 'Enlarges small or blurry images up to 4x their original size while keeping edges and transparency sharp.',
     icon: Maximize2
   }
 ];
@@ -67,6 +67,7 @@ export const VectorizerModuleView: React.FC = () => {
   const upscaleFactor = useJobStore((s) => s.upscaleFactor);
   const vectorError = useJobStore((s) => s.vectorError);
   const isProbing = useJobStore((s) => s.isProbing);
+  const isVectorBatch = useJobStore((s) => s.isVectorBatch);
   const lastVectorPreview = useJobStore((s) => s.lastVectorPreview);
 
   const setSelectedVectorPreset = useJobStore((s) => s.setSelectedVectorPreset);
@@ -105,7 +106,7 @@ export const VectorizerModuleView: React.FC = () => {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <h2 className="text-base font-semibold text-base-content">
-            Vectorizer, Background & Upscale Dock
+            Image Cutout, Upscale & Vector Tools
           </h2>
           <span className="badge badge-xs badge-accent">Active</span>
         </div>
@@ -131,7 +132,7 @@ export const VectorizerModuleView: React.FC = () => {
             <UploadCloud className="w-5 h-5 text-accent shrink-0" />
             <div>
               <p className="text-xs font-medium text-base-content">
-                Drop PNG, JPG, or WEBP assets for local vectorization, alpha matting & upscaling
+                Drop PNG, JPG, or WEBP images here, or click Select images
               </p>
               <p className="text-xs text-base-content/60 mt-0.5">
                 Outputs draggable <code className="num text-base-content">Vector_Trace.svg</code>, <code className="num text-base-content">Alpha_Matte.png</code>, and <code className="num text-base-content">Upscaled_4x.png</code> pills.
@@ -317,7 +318,7 @@ export const VectorizerModuleView: React.FC = () => {
 
               <div className="space-y-1">
                 <span className="text-xs font-medium text-base-content/70 block">
-                  Path fidelity
+                  Detail level
                 </span>
                 <div className="join">
                   {DETAIL_OPTIONS.map((opt) => (
@@ -341,7 +342,7 @@ export const VectorizerModuleView: React.FC = () => {
             <div className="flex flex-wrap items-center gap-4">
               <div className="space-y-1">
                 <span className="text-xs font-medium text-base-content/70 block">
-                  Backdrop keying tolerance
+                  Edge softness
                 </span>
                 <div className="join">
                   {TOLERANCE_OPTIONS.map((t) => (
@@ -404,13 +405,19 @@ export const VectorizerModuleView: React.FC = () => {
 
           <button
             type="button"
-            disabled={stagedLocalImages.length === 0}
+            disabled={stagedLocalImages.length === 0 || isVectorBatch}
             onClick={enqueueAndRunVectorJobs}
             className="btn btn-sm btn-primary gap-1.5 shrink-0"
           >
-            <Play className="w-3.5 h-3.5" />
+            {isVectorBatch ? (
+              <span className="loading loading-spinner loading-xs" />
+            ) : (
+              <Play className="w-3.5 h-3.5" />
+            )}
             <span>
-              Process Asset{stagedLocalImages.length > 0 ? ` (${stagedLocalImages.length})` : ''}
+              {isVectorBatch
+                ? 'Processing Batch...'
+                : `Process Image${stagedLocalImages.length > 0 ? ` (${stagedLocalImages.length})` : ''}`}
             </span>
           </button>
         </div>

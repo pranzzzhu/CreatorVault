@@ -28,37 +28,37 @@ const FIXER_PRESETS: Array<{
 }> = [
   {
     id: 'reel-optimizer',
-    title: 'Social Compression Armor (IG Reels / TikTok)',
-    badge: '1080×1920 Lanczos + Rec.709',
-    desc: 'Pre-compensates for aggressive platform re-compression using 1080×1920 Lanczos scaling, grain denoising, unsharp pre-emphasis, Rec.709 color lock, and post-upload simulation.',
+    title: 'Social Media Quality Guard (Reels / TikTok)',
+    badge: '1080×1920 + Crisp Color',
+    desc: 'Resizes to vertical 9:16, cleans up grain, sharpens details, and locks colors so Instagram and TikTok do not make your upload blurry.',
     icon: ShieldCheck
   },
   {
     id: 'deflicker',
-    title: 'LED Deflicker & De-Band',
-    badge: 'deflicker=mode=pm:size=7',
-    desc: 'Eliminates high-speed shutter banding and PWM studio lighting flicker using temporal predictive-mean filtering and gradfun de-banding.',
+    title: 'Fix Flickering Lights',
+    badge: 'Smooths indoor LED flicker',
+    desc: 'Removes annoying light pulsing and color banding caused by indoor LED lights or fast camera shutter speeds.',
     icon: Flame
   },
   {
     id: 'target-size',
-    title: 'Exact Target Size Compressor',
-    badge: 'Bitrate Solver (8MB–100MB)',
-    desc: 'Calculates exact video/audio bitrates from ffprobe duration to fit Discord, WhatsApp, or client review upload caps without guesswork.',
+    title: 'Shrink to Exact File Size',
+    badge: 'Fit 8MB, 10MB, 25MB or 50MB',
+    desc: 'Automatically shrinks your video to fit right under Discord, WhatsApp, or email file size limits.',
     icon: Gauge
   },
   {
     id: 'silence-xml',
-    title: 'Dead-Air Silence Chopper → Premiere XML',
-    badge: 'silencedetect + xmeml v5',
-    desc: 'Detects dialogue pauses and exports both a non-destructive Final Cut Pro 7 / Premiere Pro / Resolve .xml timeline and a jump-cut MP4.',
+    title: 'Auto-Cut Awkward Pauses',
+    badge: 'Premiere / Resolve XML + MP4',
+    desc: 'Finds silent pauses in talking videos and gives you both an editable Premiere/Resolve timeline and a finished jump-cut video.',
     icon: Scissors
   },
   {
     id: 'prores-proxy',
-    title: 'Instant ProRes 422 Proxy Deck',
-    badge: 'prores_ks -profile:v 0',
-    desc: 'Transcodes laggy drone or action-cam HEVC/VFR footage into scrub-friendly 1080p Apple ProRes 422 Proxy (.mov) with 48kHz PCM audio.',
+    title: 'Make Smooth Editing Proxy',
+    badge: '1080p Apple ProRes (.mov)',
+    desc: 'Converts heavy, laggy 4K or drone footage into a smooth 1080p ProRes file that scrubs without lag in your editor.',
     icon: Film
   }
 ];
@@ -78,6 +78,7 @@ export const FixerModuleView: React.FC = () => {
   const useHardwareEncoder = useJobStore((s) => s.useHardwareEncoder);
   const fixerError = useJobStore((s) => s.fixerError);
   const isProbing = useJobStore((s) => s.isProbing);
+  const isFixingBatch = useJobStore((s) => s.isFixingBatch);
   const diagnostics = useJobStore((s) => s.diagnostics);
   const jobs = useJobStore((s) => s.jobs);
 
@@ -150,7 +151,7 @@ export const FixerModuleView: React.FC = () => {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <h2 className="text-base font-semibold text-base-content">
-            FFmpeg Video Fixer & Proxy Deck
+            Video Quick Fixes & Reels Prep
           </h2>
           <span className="badge badge-xs badge-accent">Active</span>
         </div>
@@ -164,7 +165,7 @@ export const FixerModuleView: React.FC = () => {
               title="Stage the most recent video clip from the queue"
             >
               <Sparkles className="w-3 h-3 text-accent" />
-              <span>Stage latest ripped clip</span>
+              <span>Use latest downloaded video</span>
             </button>
           )}
           <span className="badge badge-xs badge-ghost num">
@@ -190,10 +191,10 @@ export const FixerModuleView: React.FC = () => {
             <UploadCloud className="w-5 h-5 text-accent shrink-0" />
             <div>
               <p className="text-xs font-medium text-base-content">
-                Drop local camera footage (.mp4, .mov, .mkv, .mxf) or browse files
+                Drop one or more videos here, or click Select videos
               </p>
               <p className="text-xs text-base-content/60 mt-0.5">
-                Probes resolution, frame rate, and duration via <code className="num">ffprobe</code> for frame-accurate processing.
+                Pick a quick-fix tool below and drag the finished video right into your editing timeline.
               </p>
             </div>
           </div>
@@ -209,7 +210,7 @@ export const FixerModuleView: React.FC = () => {
             ) : (
               <FolderPlus className="w-4 h-4" />
             )}
-            <span>{isProbing ? 'Probing...' : 'Select footage'}</span>
+            <span>{isProbing ? 'Loading...' : 'Select videos'}</span>
           </button>
         </div>
 
@@ -218,7 +219,7 @@ export const FixerModuleView: React.FC = () => {
           <div className="mt-4 pt-4 border-t border-base-300 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-base-content/70">
-                Staged source files ({stagedLocalVideos.length})
+                Selected videos ({stagedLocalVideos.length})
               </span>
               <button
                 type="button"
@@ -469,7 +470,7 @@ export const FixerModuleView: React.FC = () => {
             <div className="flex flex-wrap items-center gap-4">
               <div className="space-y-1">
                 <span className="text-xs font-medium text-base-content/70 block">
-                  Temporal PM window (frames)
+                  Smoothing strength
                 </span>
                 <div className="join">
                   {DEFLICKER_WINDOW_OPTIONS.map((w) => (
@@ -514,7 +515,7 @@ export const FixerModuleView: React.FC = () => {
               {estimatedKbps !== null && (
                 <div className="space-y-1">
                   <span className="text-xs font-medium text-base-content/70 block">
-                    Solved video bitrate
+                    Target quality
                   </span>
                   <span className="badge badge-sm badge-neutral num">
                     {estimatedKbps} kbps + 128k AAC
@@ -607,13 +608,19 @@ export const FixerModuleView: React.FC = () => {
 
             <button
               type="button"
-              disabled={stagedLocalVideos.length === 0}
+              disabled={stagedLocalVideos.length === 0 || isFixingBatch}
               onClick={enqueueAndRunFixerJobs}
               className="btn btn-sm btn-primary gap-1.5"
             >
-              <Play className="w-3.5 h-3.5" />
+              {isFixingBatch ? (
+                <span className="loading loading-spinner loading-xs" />
+              ) : (
+                <Play className="w-3.5 h-3.5" />
+              )}
               <span>
-                Run Fixer{stagedLocalVideos.length > 0 ? ` (${stagedLocalVideos.length})` : ''}
+                {isFixingBatch
+                  ? 'Processing Batch...'
+                  : `Fix Video${stagedLocalVideos.length > 0 ? ` (${stagedLocalVideos.length})` : ''}`}
               </span>
             </button>
           </div>

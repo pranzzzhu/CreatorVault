@@ -12,10 +12,12 @@ interface TimeRangeSliderProps {
 
 export function formatMmSsMs(seconds: number): string {
   const safe = Math.max(0, seconds);
-  const mins = Math.floor(safe / 60);
-  const secs = Math.floor(safe % 60);
-  const ms = Math.round((safe - Math.floor(safe)) * 100);
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+  const totalHundredths = Math.round(safe * 100);
+  const totalSecs = Math.floor(totalHundredths / 100);
+  const hundredths = String(totalHundredths % 100).padStart(2, '0');
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${hundredths}`;
 }
 
 export function parseMmSsMs(input: string, fallback: number): number {
@@ -48,9 +50,20 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
   onChangeRange
 }) => {
   const trackRef = useRef<HTMLDivElement>(null);
-  const [draggingHandle, setDraggingHandle] = useState<'start' | 'end' | null>(null);
+  const [draggingMode, setDraggingMode] = useState<'start' | 'end' | 'window' | null>(null);
+  const dragOriginRef = useRef<{
+    mouseX: number;
+    initialStart: number;
+    initialEnd: number;
+  }>({ mouseX: 0, initialStart: 0, initialEnd: 0 });
+
   const [startInput, setStartInput] = useState(formatMmSsMs(startTime));
   const [endInput, setEndInput] = useState(formatMmSsMs(endTime));
+  const currentRangeRef = useRef<{ start: number; end: number }>({ start: startTime, end: endTime });
+
+  useEffect(() => {
+    currentRangeRef.current = { start: startTime, end: endTime };
+  }, [startTime, endTime]);
 
   useEffect(() => {
     setStartInput(formatMmSsMs(startTime));
@@ -61,23 +74,45 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
   }, [endTime]);
 
   useEffect(() => {
-    if (!draggingHandle) return;
+    if (!draggingMode) return;
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (!trackRef.current) return;
+      if (!trackRef.current || duration <= 0) return;
       const rect = trackRef.current.getBoundingClientRect();
+
+      if (draggingMode === 'window') {
+        const deltaPixels = e.clientX - dragOriginRef.current.mouseX;
+        const deltaSeconds = (deltaPixels / rect.width) * duration;
+        const rawSpan = dragOriginRef.current.initialEnd - dragOriginRef.current.initialStart;
+        const windowSpan = Math.min(duration, Math.max(0.1, rawSpan));
+
+        let nextStart = dragOriginRef.current.initialStart + deltaSeconds;
+        if (nextStart < 0) nextStart = 0;
+        if (nextStart + windowSpan > duration) {
+          nextStart = Math.max(0, duration - windowSpan);
+        }
+
+        const clampedEnd = Math.min(duration, nextStart + windowSpan);
+        onChangeRange(Number(nextStart.toFixed(2)), Number(clampedEnd.toFixed(2)));
+        return;
+      }
+
       const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const newSec = ratio * duration;
+      const cur = currentRangeRef.current;
+      const minStep = Math.min(0.1, duration);
 
-      if (draggingHandle === 'start') {
-        onChangeRange(Math.min(newSec, endTime - 1), endTime);
-      } else {
-        onChangeRange(startTime, Math.max(newSec, startTime + 1));
+      if (draggingMode === 'start') {
+        const safeStart = Math.max(0, Math.min(newSec, cur.end - minStep));
+        onChangeRange(Number(safeStart.toFixed(2)), cur.end);
+      } else if (draggingMode === 'end') {
+        const safeEnd = Math.min(duration, Math.max(newSec, cur.start + minStep));
+        onChangeRange(cur.start, Number(safeEnd.toFixed(2)));
       }
     };
 
     const handleMouseUp = () => {
-      setDraggingHandle(null);
+      setDraggingMode(null);
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -86,7 +121,7 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingHandle, duration, startTime, endTime, onChangeRange]);
+  }, [draggingMode, duration, onChangeRange]);
 
   const startPercent = duration > 0 ? Math.min(100, Math.max(0, (startTime / duration) * 100)) : 0;
   const endPercent = duration > 0 ? Math.min(100, Math.max(0, (endTime / duration) * 100)) : 100;
@@ -104,18 +139,18 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
           />
           <span className="flex items-center gap-1.5 text-xs font-medium text-base-content">
             <Scissors className="w-3.5 h-3.5 text-accent" />
-            <span>Trim section before download</span>
+            <span>Cut a specific clip</span>
           </span>
         </label>
 
         <div className="flex items-center gap-2 text-xs">
           {trimEnabled ? (
             <span className="badge badge-sm badge-neutral num">
-              Clip window: {clipDuration.toFixed(1)}s
+              Clip length: {clipDuration.toFixed(1)}s (drag blue bar to move)
             </span>
           ) : (
             <span className="text-base-content/50 num">
-              Full stream ({formatMmSsMs(duration)})
+              Full length ({formatMmSsMs(duration)})
             </span>
           )}
         </div>
@@ -129,10 +164,11 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
         <div
           ref={trackRef}
           onClick={(e) => {
-            if (!trackRef.current) return;
+            if (!trackRef.current || draggingMode) return;
             const rect = trackRef.current.getBoundingClientRect();
             const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
             const clickedSec = ratio * duration;
+            if (clickedSec >= startTime && clickedSec <= endTime) return;
             const distStart = Math.abs(clickedSec - startTime);
             const distEnd = Math.abs(clickedSec - endTime);
             if (distStart <= distEnd) {
@@ -141,7 +177,7 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
               onChangeRange(startTime, Math.max(clickedSec, startTime + 1));
             }
           }}
-          className="relative h-7 bg-base-100 border border-base-300 rounded-lg cursor-pointer flex items-center px-1 overflow-visible"
+          className="relative h-8 bg-base-100 border border-base-300 rounded-lg cursor-pointer flex items-center px-1 overflow-visible select-none"
         >
           <div className="absolute inset-0 flex items-center justify-between px-3 pointer-events-none opacity-25">
             {Array.from({ length: 36 }).map((_, idx) => (
@@ -153,43 +189,60 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
             ))}
           </div>
 
+          {/* Draggable Blue Highlight Window */}
           <div
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              dragOriginRef.current = {
+                mouseX: e.clientX,
+                initialStart: startTime,
+                initialEnd: endTime
+              };
+              setDraggingMode('window');
+            }}
             style={{
               left: `${startPercent}%`,
               width: `${Math.max(1, endPercent - startPercent)}%`
             }}
-            className="absolute top-0 bottom-0 bg-accent/20 border-y border-accent pointer-events-none"
-          />
-
-          <div
-            onMouseDown={(e) => {
-              e.stopPropagation();
-              setDraggingHandle('start');
-            }}
-            style={{ left: `${startPercent}%` }}
-            title="Drag In Point"
-            className="absolute -ml-2 top-0 bottom-0 w-4 bg-primary rounded-md flex items-center justify-center cursor-ew-resize z-10"
+            title="Click and drag to move the entire clip window"
+            className="absolute top-0 bottom-0 bg-accent/25 hover:bg-accent/35 border-y border-accent cursor-grab active:cursor-grabbing z-10 flex items-center justify-center transition-colors"
           >
-            <div className="w-[2px] h-3 bg-primary-content rounded-full" />
+            <span className="text-[10px] font-medium text-base-content bg-base-100/80 px-1.5 py-0.5 rounded pointer-events-none num hidden sm:inline">
+              {clipDuration.toFixed(1)}s
+            </span>
           </div>
 
+          {/* Left Start Handle */}
           <div
             onMouseDown={(e) => {
               e.stopPropagation();
-              setDraggingHandle('end');
+              setDraggingMode('start');
+            }}
+            style={{ left: `${startPercent}%` }}
+            title="Drag Start Time"
+            className="absolute -ml-2 top-0 bottom-0 w-4 bg-primary rounded-md flex items-center justify-center cursor-ew-resize z-20 shadow"
+          >
+            <div className="w-[2px] h-3.5 bg-primary-content rounded-full" />
+          </div>
+
+          {/* Right End Handle */}
+          <div
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              setDraggingMode('end');
             }}
             style={{ left: `${endPercent}%` }}
-            title="Drag Out Point"
-            className="absolute -ml-2 top-0 bottom-0 w-4 bg-accent rounded-md flex items-center justify-center cursor-ew-resize z-10"
+            title="Drag End Time"
+            className="absolute -ml-2 top-0 bottom-0 w-4 bg-accent rounded-md flex items-center justify-center cursor-ew-resize z-20 shadow"
           >
-            <div className="w-[2px] h-3 bg-accent-content rounded-full" />
+            <div className="w-[2px] h-3.5 bg-accent-content rounded-full" />
           </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
           <div className="flex items-center justify-between">
             <span className="text-xs text-base-content/70 font-medium">
-              In point
+              Start time
             </span>
             <div className="join">
               <button
@@ -227,7 +280,7 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
 
           <div className="flex items-center justify-between">
             <span className="text-xs text-base-content/70 font-medium">
-              Out point
+              End time
             </span>
             <div className="join">
               <button

@@ -1,21 +1,22 @@
-# EGM Consolidated Review Report: Social Compression Armor (`reel-optimizer`)
+# EGM Consolidated Review Report: CreatorVault v0.1.2 Patch Session
 
-**Target Document:** `D:\CreatorVault\docs\specs\social_compression_armor_spec.md`  
-**Protocol:** Elephant-Goldfish Model (EGM) Full Flow  
-**Date:** 2026-11-08  
-**Overall Verdict:** 🔴 CONDITIONAL REJECT (4 Blockers, 7 Majors, 7 Nits Identified across 7 Review Personas)
+**Target Document:** `D:\CreatorVault\docs\specs\v0.1.2_patch_spec.md`  
+**Protocol:** Elephant-Goldfish Model (EGM) Full Flow — Uninterrupted Multi-Persona Review  
+**Date:** 2026-11-10  
+**Overall Verdict:** 🔴 CONDITIONAL REJECT (4 Blockers, 6 Majors, 6 Nits Identified across 5 Review Stages)
 
 ---
 
 ## 1. Executive Summary
 
-The **Social Compression Armor & IG Reel Optimizer** (`reel-optimizer`) provides a mathematically sound pre-conditioning pipeline (Lanczos scaling, `hqdn3d` temporal denoising, unsharp pre-emphasis, and Rec.709 color space tagging) that mitigates mobile platform re-compression degradation.
+This consolidated report synthesizes findings across all five EGM review stages (**Stage 5: Initial Zoom Out**, **Stage 6: Comprehension Test**, **Stage 7: Critic & Style Review**, **Stage 8: Intermediate Zoom Out**, and **Stage 9: Implementation Readiness Test**) auditing the 6 critical launch blocker fixes in `v0.1.2_patch_spec.md` and their implementation in CreatorVault.
 
-However, an independent multi-persona Goldfish audit spanning Stages 5 through 9 revealed 4 critical blockers:
-1. **Chroma Subsampling Coordinates**: Scaling non-square aspect ratios (e.g. 16:9 $\rightarrow$ 9:16) produces odd vertical offsets (`(1920-606)/2 = 657`), causing fractional chroma coordinate mapping in YUV420p and triggering encoder crashes or color bleeding.
-2. **Audio Track Absence Crash**: The FFmpeg pipeline injects `-af loudnorm` and `-c:a aac` unconditionally. On silent video inputs (camera B-roll, timelapses, drone clips), FFmpeg aborts with `no audio stream found`.
-3. **Leaked Cancellation in `measureQualityScore`**: While `executeFixerJob` catches cancellations, inner `catch` blocks in `measureQualityScore` swallow cancellation errors, causing aborted simulation runs to register as completed jobs with synthetic fallback scores.
-4. **Perceptual Metric Vanity Lab & Ground-Truth Asymmetry**: The dual-stream simulation compares smoothed video to itself while comparing raw video to noisy reference, producing artificially inflated metrics further exaggerated by hardcoded score offsets (`expectedLift`).
+While the patching session successfully eliminated the immediate runtime crashes (`node.exe` dependency missing, single-audio stem mixer display, Chrome cookie lock crash), a comprehensive cross-discipline audit revealed **4 architectural and operational blockers**:
+
+1. **Broken Edit-Ready NLE Contract:** Using `--remux-video mp4` for 4K/1440p YouTube downloads copies raw VP9/AV1 bitstreams without transcoding. Windows Premiere Pro and DaVinci Resolve Free reject or fail to decode VP9/AV1 in MP4 containers, while the UI badge (`H.264 / MP4`) falsely advertises H.264.
+2. **Real-ESRGAN Tile Boundary Seams & VRAM Hazard:** The sliding tile loop overwrites overlapping slices without linear feathering or cosine blending, producing permanent square grid lines across upscaled cutouts >640×640. Creating a full 4× canvas on the GPU device risks CUDA OOM crashes on 4GB/6GB cards, and Lanczos alpha upscaling does not align with neural RGB edges.
+3. **Non-Atomic, Unbuffered Binary Downloads:** `BinaryManager.installBinary('yt-dlp')` buffers 60MB into V8 memory and writes directly to `bin/yt-dlp.exe` with synchronous `fs.writeFileSync()`. If the file is locked by Windows Defender or an active probe, the call fails with `EBUSY` and permanently corrupts the binary.
+4. **Specification Incompleteness (Fix 6B):** The patch specification provided no-op code (re-inserting identical dark theme colors) and relegated the actual solution (`window:set-theme` IPC handler) to an informal parenthetical remark. While the codebase now contains working IPC, the specification itself remains invalid.
 
 ---
 
@@ -23,130 +24,117 @@ However, an independent multi-persona Goldfish audit spanning Stages 5 through 9
 
 ### 🔴 Blockers (Must Remediate Before Production)
 
-*   **[B1] Enforce Even Pad Offsets for YUV420p Chroma Subsampling**:
-    *   *Sources:* `egm-design` (Blocker 1), `egm-intermediate-zoom-out` (Blocker 1).
-    *   *Problem:* While scaled video dimensions are truncated to even integers (`trunc(.../2)*2`), vertical pad centering `(oh-ih)/2` evaluates to odd integers on 16:9 inputs (`ih = 606`, offset = `657`). Under YUV420p 2×2 chroma subsampling, odd pixel offsets place chroma at fractional coordinates (`328.5`), violating container specs and causing aborts on strict decoders.
-    *   *Required Fix:* Enforce even offsets in filter expression:
-        `pad=1080:1920:'trunc((ow-iw)/4)*2':'trunc((oh-ih)/4)*2':black`.
+*   **[B1] YouTube 4K Remuxing Does Not Transcode VP9/AV1 (Broken Edit-Ready Guarantee)**:
+    *   *Sources:* `egm-zoom-out` (F-02), `egm-comprehension` (Finding 2), `egm-design` (Finding 1), `egm-style` (Finding 4), `egm-implementation-readiness` (Finding 2).
+    *   *Problem:* YouTube serves 4K/1440p exclusively in VP9/AV1 with Opus audio. `--remux-video mp4` copies bitstreams (`-c copy`) without transcoding. The resulting MP4 file causes Premiere Pro and DaVinci Resolve on Windows to drop frames, display green artifacts, or fail import.
+    *   *Required Fix:* In Edit-Ready mode at $\ge 1440$p, transcode streams to true H.264/AAC via CreatorVault's hardware-accelerated `FfmpegRunner` (`h264_nvenc` / `libx264` and `-c:a aac -b:a 320k`). In Raw mode, keep native MKV/WebM and accurately badge as `'VP9 / MKV'`.
 
-*   **[B2] Guard Audio Normalization Against Silent Video Streams**:
-    *   *Sources:* `egm-design` (Blocker 2).
-    *   *Problem:* Unconditional injection of `-af loudnorm=... -c:a aac -b:a 320k` causes FFmpeg to exit with fatal error `no audio stream found` when processing B-roll, drone, or timelapse footage lacking audio tracks.
-    *   *Required Fix:* Inspect audio stream presence before assembling audio arguments. If audio stream is absent, omit `-af loudnorm` and `-c:a aac` (pass `-an` or generate silent sync track if container requires audio).
+*   **[B2] Real-ESRGAN Tile Seams, VRAM Over-Allocation & Edge Halos**:
+    *   *Sources:* `egm-zoom-out` (F-01), `egm-comprehension` (Finding 4), `egm-design` (Finding 5), `egm-intermediate-zoom-out` (B2).
+    *   *Problem:* The tiling loop strides by $384 - 16 = 368$, but direct assignment `sr[:, :, y0*4:y1*4, x0*4:x1*4] = sr_patch` overwrites overlap zones without linear feathering. Convolutions clobber adjacent tiles, causing grid line artifacts across images >640×640. Allocating `sr` canvas directly on the CUDA device risks out-of-memory errors on 4GB/6GB GPUs. Lanczos alpha mask scaling mismatches neural RGB boundaries, creating edge fringing.
+    *   *Required Fix:*
+        1. Allocate canvas in host RAM (`device='cpu'`), streaming only 384×384 patches through GPU VRAM.
+        2. Apply linear feathering / cosine windowing across overlap margins before tile accumulation.
+        3. Clamp cutout resolution or align alpha mask edges using bilateral/guided filtering.
 
-*   **[B3] Re-Throw Job Cancellation in `measureQualityScore`**:
-    *   *Sources:* `egm-codebase-details` (Blocker 1).
-    *   *Problem:* `measureQualityScore` in `FfmpegRunner.ts` wraps VMAF/SSIM execution in bare `catch` blocks. If user clicks Abort during simulation, `runProcessAsync` rejects with cancellation, but `measureQualityScore` catches and swallows the error, returning `null`. The runner injects fallback scores (`76.4`, `92.1`) and marks the job as `completed` instead of `cancelled`.
-    *   *Required Fix:* In `measureQualityScore`:
-        ```typescript
-        catch (err) {
-          if ((err as Error).message?.toLowerCase().includes('cancel')) throw err;
-          // Fall back to SSIM or null
-        }
-        ```
+*   **[B3] Non-Atomic, Unbuffered Binary Download & File Lock Crashes**:
+    *   *Sources:* `egm-zoom-out` (F-03), `egm-comprehension` (Finding 5), `egm-design` (Finding 4), `egm-implementation-readiness` (Finding 4).
+    *   *Problem:* Writing directly to `bin/yt-dlp.exe` via `res.arrayBuffer()` and synchronous `fs.writeFileSync()` blocks the main Electron thread and crashes with `EBUSY`/`EPERM` if the executable is running, held by an active probe, or locked by antivirus. Partial or failed downloads corrupt the binary.
+    *   *Required Fix:* Stream downloads using `stream.pipeline` with `AbortSignal.timeout(60000)` into a temporary file (`yt-dlp.exe.tmp`), verify binary integrity (size > 10MB), and atomically replace the destination file with `fs.renameSync()`. On macOS, invoke `chmod +x` and strip quarantine (`xattr -d com.apple.quarantine`).
 
-*   **[B4] Decouple Simulation from Primary Deliverable & Eliminate Synthetic Metric Offsets**:
-    *   *Sources:* `egm-intermediate-zoom-out` (Blocker 2), `egm-design` (Major 1), `egm-comprehension` (Blocker 1).
-    *   *Problem:* Dual-stream metric measurement compares compressed preview against smoothed intermediate master rather than original source, skewing metrics. Hardcoded `grainBonus + sharpenBonus` offsets inject synthetic "vanity lift" scores.
-    *   *Required Fix:* Frame simulation as an optional visual preview deliverable (`Simulated_IG_Constrained.mp4`). If numerical metrics are reported, measure both distorted streams against the original reference, remove arbitrary score offset addition, or present simulation solely as a qualitative visual preview pill.
+*   **[B4] Fix 6B Titlebar Code Snippet Incomplete in Spec**:
+    *   *Sources:* `egm-comprehension` (Finding 1), `egm-style` (Finding 1), `egm-design` (Finding 6), `egm-implementation-readiness` (Finding 1).
+    *   *Problem:* Section 6B of `v0.1.2_patch_spec.md` pastes identical hardcoded dark colors (`color: '#050505'`) while the actual solution (`window:set-theme` IPC) was left as an optional parenthetical remark.
+    *   *Required Fix:* Update the specification to formally mandate the `window:set-theme` IPC channel, preload bridge, and store trigger as the canonical solution.
 
 ---
 
-### 🟡 Majors (Architecture, Ergonomics & Quality)
+### 🟡 Majors (Architecture, Concurrency & Quality)
 
-*   **[M1] Fix Inverted Hardware Acceleration Hierarchy**:
-    *   *Sources:* `egm-zoom-out` (Major 4), `egm-codebase-details` (Major 5), `egm-intermediate-zoom-out` (Major 6).
-    *   *Problem:* Spec titles NVENC an "automatic hardware fallback" from `libx264`. Software `libx264` is universal baseline/fallback; NVENC is optional speed acceleration.
-    *   *Required Fix:* Calibrate text to: "Master export defaults to software `libx264`; optional GPU acceleration is selectable via Hardware toggle (`h264_nvenc`)."
+*   **[M1] Unchecked Job Cancellation & Mutated State on Cookie-Lock Retry**:
+    *   *Sources:* `egm-design` (Finding 2), `egm-implementation-readiness` (Finding 3), `egm-zoom-out` (F-04).
+    *   *Problem:* When `executeDownload()` retries after a cookie lock, it lacks an entry cancellation check. If the user clicks Abort during failure handling, a rogue background download process spawns untracked. Also, `config.browserCookies = 'none'` mutates caller state in place.
+    *   *Required Fix:* Add cancellation check on entry (`if (this.cancelledJobs.has(jobId)) throw new Error('Job cancelled')`), and clone config (`{ ...config, browserCookies: 'none' }`).
 
-*   **[M2] Clarify Platform Selector Semantics**:
-    *   *Sources:* `egm-zoom-out` (Major 2), `egm-comprehension` (Major 2), `egm-intermediate-zoom-out` (Major 4).
-    *   *Problem:* `reelPlatform` exposes 3 platform options (`ig-reels`, `tiktok`, `yt-shorts`) that execute identical 1080×1920 CRF 18 encoding settings, differing only in output filename prefix.
-    *   *Required Fix:* Clarify in spec that platform choices apply targeted metadata tags and naming prefixes, or collapse to single unified vertical preset if divergent profiles are not required.
+*   **[M2] Overbroad Cookie Error Matching Causes Redundant Re-Downloads**:
+    *   *Sources:* `egm-comprehension` (Finding 3), `egm-design` (Finding 2), `egm-intermediate-zoom-out` (M1).
+    *   *Problem:* `fullErr.includes('Permission denied')` catches normal OS disk write errors (read-only output folder, full disk). A 2GB download failing at final file write will trigger an unwarranted anonymous retry, downloading the entire payload twice before failing.
+    *   *Required Fix:* Narrow error matching to cookie lock patterns: `/(cookie.*locked|cannot access.*cookie|Could not copy Chrome cookie)/i`.
 
-*   **[M3] Enforce Constant Frame Rate (CFR) on `targetFps: 'keep'`**:
-    *   *Sources:* `egm-design` (Major 3).
-    *   *Problem:* Problem statement promises elimination of VFR stutter, but filter chain injects `fps` filter only when 30 or 60 is selected. Setting `targetFps: 'keep'` leaves mobile VFR streams untouched.
-    *   *Required Fix:* Force CFR container timing on `'keep'` using `-fps_mode cfr` (or `-vsync cfr`) or probe input FPS and set `fps=${probedFps}`.
+*   **[M3] Multi-Stem Audio Summation Collision (Master Track Summed with Stems)**:
+    *   *Sources:* `egm-design` (Finding 6), `egm-intermediate-zoom-out` (M2).
+    *   *Problem:* `audioPills` includes `Full_Audio.wav` alongside isolated Demucs stems (`Vocals.wav`, `Bass.wav`). `togglePlayAll` plays the full master rip simultaneously with stems, causing +6dB gain clipping and acoustic comb-filtering.
+    *   *Required Fix:* Filter out master audio pills: `const stemPills = audioPills.filter(p => p.id !== 'master'); if (stemPills.length <= 1) return null;`.
 
-*   **[M4] Restrict Rec.709 Color Lock to SDR Inputs in Non-Goals**:
-    *   *Sources:* `egm-design` (Major 2), `egm-intermediate-zoom-out` (Major 3).
-    *   *Problem:* Injecting `-colorspace bt709 -color_primaries bt709 -color_trc bt709` tags metadata without tone-mapping HDR transfer curves, causing blown-out contrast on 10-bit HLG/PQ footage.
-    *   *Required Fix:* Explicitly scope Rec.709 lock to SDR inputs in Non-Goals; note that HDR tone-mapping is NLE domain.
+*   **[M4] YouTube Signature Throttling Risk (Missing JS Engine Bridge)**:
+    *   *Sources:* `egm-design` (Finding 3), `egm-intermediate-zoom-out` (M3).
+    *   *Problem:* Removing `--js-runtimes node` prevents crashes on systems without Node in `PATH`, but leaves yt-dlp subject to YouTube n-sig speed throttling (down to 30–50 KB/s).
+    *   *Required Fix:* Pass the absolute path of Electron's bundled Node binary (`process.execPath`) when invoking yt-dlp, or bundle a lightweight standalone JS engine.
 
-*   **[M5] Structure Implementation Plan into Incremental Phases with Test Checkpoints**:
-    *   *Sources:* `egm-implementation-readiness` (Major 1, Major 3).
-    *   *Problem:* Plan is a flat file list lacking progressive phases and automated verification assertions.
-    *   *Required Fix:* Partition Detailed Implementation Plan into Phases 1–4 with automated verification checkpoints.
+*   **[M5] FFmpeg CAS Filter Crashes on Transparent PNG Upscale Fallback**:
+    *   *Sources:* `egm-implementation-readiness` (Finding 5).
+    *   *Problem:* When Spandrel/PyTorch is unavailable, `VectorRunner.runAssetUpscaler()` falls back to FFmpeg with `cas=strength=0.65`. The `cas` filter rejects alpha (`rgba`) inputs, crashing on cutout PNGs from `rembg`.
+    *   *Required Fix:* Strip alpha or use `unsharp` alone for transparent PNG inputs in FFmpeg fallback.
 
-*   **[M6] Document State Defaults and Zero-Decision Contracts**:
-    *   *Sources:* `egm-implementation-readiness` (Blocker 1), `egm-codebase-details` (Blocker 2).
-    *   *Problem:* Plan specifies "explicit defaults" without documenting default values, and omits exact NVENC CLI arrays.
-    *   *Required Fix:* Provide verbatim initial state values and exact NVENC argument arrays in Section 4.
-
-*   **[M7] Correct Mermaid IPC Architecture Boundary**:
-    *   *Sources:* `egm-zoom-out` (Major 1), `egm-intermediate-zoom-out` (Nit 7).
-    *   *Problem:* Diagram shows `Sim` worker returning directly to Renderer `QueueState`, violating Electron context isolation.
-    *   *Required Fix:* Route return path through `IpcHandler` and `VortexApi`.
+*   **[M6] Spec Altitude Collapse, Misdirection & Scale Hardcoding**:
+    *   *Sources:* `egm-zoom-out` (F-05), `egm-comprehension` (Finding 2, 4), `egm-style` (Finding 5).
+    *   *Problem:* Spec directed readers to static `defaultQualities` to edit `executeDownload()`. Python script hardcodes 4× multiplier arithmetic, crashing if a 2× model is passed.
+    *   *Required Fix:* Correct target method reference and compute scaling dynamically: `scale_factor = target_scale`.
 
 ---
 
-### 🟢 Nits (Clarity, Style & Hygiene)
+### 🟢 Nits (Clarity, Portability & Hygiene)
 
-*   **[N1] Calibrate Style and Tone**:
-    *   *Sources:* `egm-style` (Findings 1, 2, 3), `egm-structural` (Finding 1).
-    *   *Fix:* Remove first-person voice ("We probe..."), personification ("Social armor prioritizes..."), and consumer branding ("Sony A7IV", "Netflix VMAF"). Replace "macroblock banding" with "macroblocking and gradient banding".
-*   **[N2] Sanitize Combat Metaphor in `HANDOVER.md`**:
-    *   *Sources:* `egm-codebase-details` (Nit 2).
-    *   *Fix:* Replace "hostile platform upload simulator" with "constrained platform upload simulator" in `HANDOVER.md#L48`.
-*   **[N3] Escape Comparison Operators in Markdown**:
-    *   *Sources:* `egm-structural` (Finding 3).
-    *   *Fix:* Wrap `(<3s)` in code span `(< 3s)` to prevent XML/MDX parser warnings.
-*   **[N4] Scrub Internal Review Shorthand**:
-    *   *Sources:* `egm-comprehension` (Nit 1), `egm-intermediate-zoom-out` (Nit 8).
-    *   *Fix:* Replace `(CB-1)` and `(MJ-1)` with explicit descriptive statements (sequential FIFO queue, immediate staging clear).
-*   **[N5] Drain Stdout on Legacy Methods**:
-    *   *Sources:* `egm-codebase-details` (Nit 1).
-    *   *Fix:* Add `proc.stdout?.resume()` to `extractOrNormalizeWav` and `detectSpeechSegments` in `FfmpegRunner.ts`.
-*   **[N6] Unify List Indentation**:
-    *   *Sources:* `egm-structural` (Finding 4).
-    *   *Fix:* Standardize numbered lists to single-space indentation (`1. `).
-*   **[N7] Add Cancellation Edge to Mermaid Diagram**:
-    *   *Sources:* `egm-design` (Nit 3).
-    *   *Fix:* Illustrate user abort event path from Queue UI to Engine child process.
+*   **[N1] Hardcoded Developer Drive Paths**:
+    *   *Sources:* `egm-zoom-out` (F-07), `egm-intermediate-zoom-out` (N1).
+    *   *Problem:* References to `D:\CreatorVault\bin\models` exist in `BinaryManager.ts` and `VectorRunner.ts`.
+    *   *Fix:* Resolve model paths relative to `app.getPath('userData')` or `process.resourcesPath`.
+*   **[N2] Typo in Specification (`rmbg`)**:
+    *   *Sources:* `egm-style` (Finding 10), `egm-comprehension` (Finding 8).
+    *   *Fix:* Replace `rmbg` with `rembg`.
+*   **[N3] Titlebar Cold-Start Dark Flash**:
+    *   *Sources:* `egm-zoom-out` (F-06), `egm-design` (Finding 6).
+    *   *Fix:* Read persisted theme state before `createWindow()` to initialize overlay color immediately.
+*   **[N4] Ambiguous Hook Placement in React Mixer Component**:
+    *   *Sources:* `egm-style` (Finding 7), `egm-comprehension` (Finding 7).
+    *   *Fix:* Ensure guard placement is strictly after all hook declarations.
+*   **[N5] Outdated `installHint` for `yt-dlp` in Diagnostics**:
+    *   *Sources:* `egm-implementation-readiness` (Finding 7).
+    *   *Fix:* Update hint to `'Click 1-Click Install or place yt-dlp in ./bin'`.
+*   **[N6] Version String Mismatch in `package.json`**:
+    *   *Sources:* `egm-implementation-readiness` (Finding 8).
+    *   *Fix:* Bump version in `package.json` from `"0.1.1"` to `"0.1.2"`.
 
 ---
 
-## 3. Traceability Matrix
+## 3. Cross-Stage Traceability Matrix
 
-| Raw Finding ID | Reviewer Persona | Review Stage | Consolidated Action Item | Priority |
-| :--- | :--- | :--- | :--- | :--- |
-| `Design B-1` | `egm-design` | Stage 7 (Critic) | **[B1]** YUV420p Even Pad Offsets | 🔴 Blocker |
-| `Int Zoom B-1` | `egm-intermediate-zoom-out` | Stage 8 (Int Zoom) | **[B1]** YUV420p Even Pad Offsets | 🔴 Blocker |
-| `Design B-2` | `egm-design` | Stage 7 (Critic) | **[B2]** Silent Video Audio Crash | 🔴 Blocker |
-| `Codebase B-1` | `egm-codebase-details` | Stage 9 (Readiness) | **[B3]** Swallowed Cancellation in `measureQualityScore` | 🔴 Blocker |
-| `Comprehension B-1` | `egm-comprehension` | Stage 6 (Comprehension) | **[B4]** Simulation Decoupling & Ground Truth | 🔴 Blocker |
-| `Int Zoom B-2` | `egm-intermediate-zoom-out` | Stage 8 (Int Zoom) | **[B4]** Simulation Decoupling & Ground Truth | 🔴 Blocker |
-| `Design M-1` | `egm-design` | Stage 7 (Critic) | **[B4]** Simulation Decoupling & Ground Truth | 🔴 Blocker |
-| `Zoom Out M-4` | `egm-zoom-out` | Stage 5 (Zoom Out) | **[M1]** Inverted Hardware Hierarchy | 🟡 Major |
-| `Codebase M-5` | `egm-codebase-details` | Stage 9 (Readiness) | **[M1]** Inverted Hardware Hierarchy | 🟡 Major |
-| `Zoom Out M-2` | `egm-zoom-out` | Stage 5 (Zoom Out) | **[M2]** Clarify Platform Selector Semantics | 🟡 Major |
-| `Comprehension M-2` | `egm-comprehension` | Stage 6 (Comprehension) | **[M2]** Clarify Platform Selector Semantics | 🟡 Major |
-| `Design M-3` | `egm-design` | Stage 7 (Critic) | **[M3]** Enforce CFR on Keep FPS | 🟡 Major |
-| `Design M-2` | `egm-design` | Stage 7 (Critic) | **[M4]** Restrict Rec.709 to SDR in Non-Goals | 🟡 Major |
-| `Int Zoom M-3` | `egm-intermediate-zoom-out` | Stage 8 (Int Zoom) | **[M4]** Restrict Rec.709 to SDR in Non-Goals | 🟡 Major |
-| `Readiness M-1` | `egm-implementation-readiness` | Stage 9 (Readiness) | **[M5]** Incremental Phasing & Test Spec | 🟡 Major |
-| `Readiness B-1` | `egm-implementation-readiness` | Stage 9 (Readiness) | **[M6]** Document State Defaults & CLI Arrays | 🟡 Major |
-| `Codebase B-2` | `egm-codebase-details` | Stage 9 (Readiness) | **[M6]** Document State Defaults & CLI Arrays | 🟡 Major |
-| `Zoom Out M-1` | `egm-zoom-out` | Stage 5 (Zoom Out) | **[M7]** Mermaid IPC Architecture Boundary | 🟡 Major |
-| `Style M-1..3` | `egm-style` | Stage 7 (Critic) | **[N1]** Style & Tone Calibration | 🟢 Nit |
-| `Codebase N-2` | `egm-codebase-details` | Stage 9 (Readiness) | **[N2]** Sanitize Metaphor in `HANDOVER.md` | 🟢 Nit |
-| `Structural N-3` | `egm-structural` | Stage 7 (Critic) | **[N3]** Escape `<` in Markdown | 🟢 Nit |
-| `Comprehension N-1` | `egm-comprehension` | Stage 6 (Comprehension) | **[N4]** Scrub Internal Audit Shorthand | 🟢 Nit |
-| `Codebase N-1` | `egm-codebase-details` | Stage 9 (Readiness) | **[N5]** Drain Stdout on Legacy Methods | 🟢 Nit |
-| `Structural N-4` | `egm-structural` | Stage 7 (Critic) | **[N6]** Unify List Indentation | 🟢 Nit |
-| `Design N-3` | `egm-design` | Stage 7 (Critic) | **[N7]** Add Cancellation Edge to Mermaid | 🟢 Nit |
+| Raw Finding Source | Consolidated ID | Scope | Resolution Status in Codebase |
+|---|---|---|---|
+| `egm-zoom-out` (F-02) / `egm-design` (1) | **[B1]** | `YtDlpRunner.ts` | 🔴 Requires transcode handoff or badge correction |
+| `egm-zoom-out` (F-01) / `egm-design` (5) | **[B2]** | `VectorRunner.ts` | 🔴 Requires CPU canvas & tile feathering |
+| `egm-zoom-out` (F-03) / `egm-design` (4) | **[B3]** | `BinaryManager.ts` | 🔴 Requires atomic `.tmp` + rename |
+| `egm-comprehension` (1) / `egm-style` (1) | **[B4]** | `v0.1.2_patch_spec.md` | 🟢 Resolved in code; spec needs text update |
+| `egm-design` (2) / `egm-readiness` (3) | **[M1]** | `YtDlpRunner.ts` | 🟡 Requires cancellation guard on entry |
+| `egm-comprehension` (3) / `egm-design` (2) | **[M2]** | `YtDlpRunner.ts` | 🟡 Requires narrowed regex for cookie lock |
+| `egm-design` (6) / `egm-intermediate` (M2) | **[M3]** | `JobQueueList.tsx` | 🟡 Requires filtering `id !== 'master'` |
+| `egm-design` (3) / `egm-intermediate` (M3) | **[M4]** | `YtDlpRunner.ts` | 🟡 Requires Electron Node binary path |
+| `egm-readiness` (5) | **[M5]** | `VectorRunner.ts` | 🟡 Requires CAS filter alpha guard |
+| `egm-style` (5) / `egm-comprehension` (2) | **[M6]** | `v0.1.2_patch_spec.md` | 🟡 Requires spec text correction |
+| `egm-zoom-out` (F-07) | **[N1]** | `BinaryManager.ts` | 🟢 Hygiene cleanup |
+| `egm-style` (10) | **[N2]** | `v0.1.2_patch_spec.md` | 🟢 Typo fix |
+| `egm-zoom-out` (F-06) | **[N3]** | `main.ts` | 🟢 Polish cleanup |
+| `egm-style` (7) | **[N4]** | `JobQueueList.tsx` | 🟢 Correctly placed in code |
+| `egm-readiness` (7) | **[N5]** | `BinaryManager.ts` | 🟢 Diagnostic hint update |
+| `egm-readiness` (8) | **[N6]** | `package.json` | 🟢 Version bump |
 
 ---
 
-*Report compiled via Elephant-Goldfish Model (EGM) Full Flow.*
+## 4. Remediation Checklist for Release v0.1.2
+
+1. **Fix 1:** For Edit-Ready 4K/1440p, hand off to `FfmpegRunner` for hardware-accelerated H.264/AAC transcoding (`h264_nvenc` or `libx264`). In Raw mode, keep native MKV/WebM and set badge accurately.
+2. **Fix 2:** Add cancellation check on `executeDownload()` entry and narrow cookie error regex to `/(cookie.*locked|cannot access.*cookie|Could not copy Chrome cookie)/i`.
+3. **Fix 4:** Update `BinaryManager.installBinary('yt-dlp')` to stream to a temporary `.tmp` file with a 60s timeout, then atomically rename via `fs.renameSync()`.
+4. **Fix 5:** Allocate `sr` canvas on CPU, apply linear feathering across tile overlap margins, and guard CAS fallback against RGBA inputs.
+5. **Fix 6A:** Filter out `pill.id === 'master'` in `JobQueueList.tsx` so stems audition cleanly without gain clipping.
+6. **Package Version:** Bump `package.json` version string to `"0.1.2"`.

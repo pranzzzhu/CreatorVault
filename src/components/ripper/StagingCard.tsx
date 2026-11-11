@@ -2,9 +2,10 @@ import React from 'react';
 import {
   ChevronDown,
   Clock,
+  Download,
   FolderOpen,
   Info,
-  Rocket,
+  Scissors,
   Sliders,
   User,
   X
@@ -38,13 +39,22 @@ export const StagingCard: React.FC = () => {
     stagedMedia.availableQualities.find((q) => q.id === selectedQuality) ||
     stagedMedia.availableQualities[0];
 
-  const codecSummary = selectedQuality.startsWith('audio')
+  const formatSummary = selectedQuality.startsWith('audio')
     ? editReadyMode || selectedQuality === 'audio-wav'
-      ? '48kHz 16-bit PCM (.wav)'
-      : '320kbps (.mp3)'
+      ? 'WAV Audio (Best for editing)'
+      : 'MP3 Audio'
     : editReadyMode
-      ? 'H.264 + AAC (.mp4 NLE safe)'
-      : 'Native stream (.mkv)';
+      ? 'MP4 Video (Ready to edit)'
+      : 'Original MKV Video';
+
+  const downloadButtonLabel =
+    stemMode !== 'off'
+      ? trimEnabled
+        ? 'Cut & Split Stems'
+        : 'Download & Split Stems'
+      : trimEnabled
+        ? 'Cut & Download Clip'
+        : 'Download';
 
   return (
     <div className="card bg-base-200 border border-base-300 p-4 space-y-4">
@@ -68,7 +78,7 @@ export const StagingCard: React.FC = () => {
               </span>
               {stagedMedia.isSimulatedProbe && (
                 <span className="badge badge-xs badge-warning">
-                  Simulated probe
+                  Preview mode
                 </span>
               )}
               <span className="text-xs text-base-content/60 flex items-center gap-1 truncate">
@@ -83,15 +93,15 @@ export const StagingCard: React.FC = () => {
             <div className="flex items-center gap-2 text-xs text-base-content/60">
               <Clock className="w-3.5 h-3.5 text-accent" />
               <span>
-                Target container: <strong className="text-base-content num">{codecSummary}</strong>
+                Saves as: <strong className="text-base-content num">{formatSummary}</strong>
               </span>
               <div
                 className="tooltip tooltip-right"
-                data-tip="Edit-Ready mode remuxes VP9/WebM into constant-frame-rate H.264 MP4 or 48kHz PCM WAV so Premiere Pro and DaVinci Resolve never drop frames."
+                data-tip="Automatically saves videos as standard MP4 and audio as WAV so they drop right into Premiere, Resolve, or FL Studio without lag."
               >
                 <button
                   type="button"
-                  aria-label="Container pipeline details"
+                  aria-label="Format info"
                   className="btn btn-ghost btn-xs btn-circle text-base-content/50 hover:text-base-content"
                 >
                   <Info className="w-3.5 h-3.5" />
@@ -101,7 +111,7 @@ export const StagingCard: React.FC = () => {
           </div>
         </div>
 
-        {/* Stream Quality daisyUI Dropdown + Close Button */}
+        {/* Quality Dropdown + Close Button */}
         <div className="flex items-start gap-2 shrink-0">
           <details className="dropdown dropdown-end">
             <summary className="btn btn-sm btn-outline gap-2 font-normal">
@@ -109,14 +119,14 @@ export const StagingCard: React.FC = () => {
               <span className="badge badge-xs badge-neutral num">
                 {editReadyMode
                   ? activeQualityObj?.isAudioOnly
-                    ? 'PCM WAV'
-                    : 'H.264 MP4'
+                    ? 'WAV'
+                    : 'MP4'
                   : activeQualityObj?.codecBadge}
               </span>
               <ChevronDown className="w-3.5 h-3.5 opacity-60" />
             </summary>
             <ul className="dropdown-content menu bg-base-100 rounded-box z-20 w-64 p-2 shadow-xl border border-base-300 mt-1">
-              <li className="menu-title text-xs">Select stream format</li>
+              <li className="menu-title text-xs">Choose quality</li>
               {stagedMedia.availableQualities.map((q) => (
                 <li key={q.id}>
                   <button
@@ -132,7 +142,7 @@ export const StagingCard: React.FC = () => {
                   >
                     <span>{q.label}</span>
                     <span className="badge badge-xs badge-ghost num">
-                      {editReadyMode ? (q.isAudioOnly ? 'PCM WAV' : 'H.264 MP4') : q.codecBadge}
+                      {editReadyMode ? (q.isAudioOnly ? 'WAV' : 'MP4') : q.codecBadge}
                     </span>
                   </button>
                 </li>
@@ -143,7 +153,7 @@ export const StagingCard: React.FC = () => {
           <button
             type="button"
             onClick={clearStagedMedia}
-            title="Dismiss staging card"
+            title="Close"
             className="btn btn-sm btn-ghost btn-square"
           >
             <X className="w-4 h-4" />
@@ -164,15 +174,15 @@ export const StagingCard: React.FC = () => {
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5 text-xs font-medium text-base-content/80 mr-1">
             <Sliders className="w-3.5 h-3.5 text-accent" />
-            <span>AI stems:</span>
+            <span>Split audio stems:</span>
           </span>
 
           <div className="join">
             {(
               [
                 { id: 'off', label: 'Off' },
-                { id: '2-stem', label: '2-Stem (Vocals + BGM)' },
-                { id: '4-stem', label: '4-Stem (Studio)' }
+                { id: '2-stem', label: 'Vocals + Instrumental' },
+                { id: '4-stem', label: 'Vocals, Drums, Bass, Other' }
               ] as Array<{ id: StemMode; label: string }>
             ).map((opt) => (
               <button
@@ -193,11 +203,11 @@ export const StagingCard: React.FC = () => {
           <button
             type="button"
             onClick={chooseOutputDirectory}
-            title={`Export Folder: ${outputDir}`}
+            title={`Save folder: ${outputDir}`}
             className="btn btn-sm btn-ghost border border-base-300 gap-1.5 max-w-[220px] font-normal"
           >
             <FolderOpen className="w-3.5 h-3.5 text-accent shrink-0" />
-            <span className="truncate num text-xs">{outputDir || 'Export folder'}</span>
+            <span className="truncate num text-xs">{outputDir || 'Save folder'}</span>
           </button>
 
           <button
@@ -205,14 +215,8 @@ export const StagingCard: React.FC = () => {
             onClick={enqueueAndRunStagedJob}
             className="btn btn-sm btn-primary gap-2"
           >
-            <Rocket className="w-4 h-4" />
-            <span>
-              {stemMode === 'off'
-                ? trimEnabled
-                  ? 'Clip & rip to disk'
-                  : 'Rip stream'
-                : 'Rip & split AI stems'}
-            </span>
+            {trimEnabled ? <Scissors className="w-4 h-4" /> : <Download className="w-4 h-4" />}
+            <span>{downloadButtonLabel}</span>
           </button>
         </div>
       </div>

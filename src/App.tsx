@@ -6,6 +6,7 @@ import { StagingCard } from './components/ripper/StagingCard';
 import { JobQueueList } from './components/ripper/JobQueueList';
 import { FixerModuleView } from './components/fixer/FixerModuleView';
 import { VectorizerModuleView } from './components/vectorizer/VectorizerModuleView';
+import { ConverterModuleView } from './components/converter/ConverterModuleView';
 import { useJobStore } from './store/useJobStore';
 
 export const App: React.FC = () => {
@@ -83,6 +84,8 @@ export const App: React.FC = () => {
             {activeModule === 'fixer' && <FixerModuleView />}
 
             {activeModule === 'vectorizer' && <VectorizerModuleView />}
+
+            {activeModule === 'converter' && <ConverterModuleView />}
           </div>
         </main>
       </div>

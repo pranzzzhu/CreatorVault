@@ -4,13 +4,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type {
+  ConverterJobConfig,
+  ConverterTargetFormat,
   FixerJobConfig,
   JobProgressEvent,
+  LocalMediaMetadata,
   LocalVideoMetadata,
+  OutputPill,
   ReelOptimizerOptions,
   StemOutputPill
 } from '../../src/types/media';
 import { killProcessTree } from './BinaryManager';
+import { getNonCollidingFilePath, releaseFilePath } from './FileUtils';
 
 // Even scaled size and even pad offsets keep YUV420p chroma planes aligned (offset = trunc(x/4)*2).
 const REEL_SCALE_PAD_FILTER =
@@ -265,11 +270,37 @@ export class FfmpegRunner {
   /**
    * Probes a local video file via ffprobe to extract exact duration, resolution, frame rate, and codecs.
    */
+  /**
+   * @deprecated Use probeLocalMedia instead. Kept for backwards compatibility with Module 2.
+   */
   public probeLocalVideo(
     filePath: string,
     ffprobePath: string,
     isFfprobeAvailable: boolean
   ): LocalVideoMetadata {
+    const meta = this.probeLocalMedia(filePath, ffprobePath, isFfprobeAvailable);
+    return {
+      filePath: meta.filePath,
+      fileName: meta.fileName,
+      fileSizeMB: meta.fileSizeMB,
+      duration: meta.duration,
+      width: meta.width,
+      height: meta.height,
+      fps: meta.fps,
+      videoCodec: meta.videoCodec,
+      audioCodec: meta.audioCodec
+    };
+  }
+
+  /**
+   * Probes any local video or audio file via ffprobe, automatically classifying it as 'video' or 'audio'
+   * (ignoring embedded album art streams on MP3/FLAC files).
+   */
+  public probeLocalMedia(
+    filePath: string,
+    ffprobePath: string,
+    isFfprobeAvailable: boolean
+  ): LocalMediaMetadata {
     if (!fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
     }
@@ -277,13 +308,17 @@ export class FfmpegRunner {
     const stat = fs.statSync(filePath);
     const fileSizeMB = Number((stat.size / (1024 * 1024)).toFixed(2));
     const fileName = path.basename(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const audioExts = new Set(['.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.opus', '.wma']);
 
     let duration = 30;
-    let width = 1920;
-    let height = 1080;
+    let mediaType: 'video' | 'audio' = audioExts.has(ext) ? 'audio' : 'video';
+    let width = 0;
+    let height = 0;
     let fps = 30;
-    let videoCodec = 'h264';
-    let audioCodec = 'aac';
+    let videoCodec = 'none';
+    let audioCodec = 'none';
+    let sampleRate = 0;
 
     if (isFfprobeAvailable) {
       try {
@@ -311,10 +346,21 @@ export class FfmpegRunner {
           const streams: Array<Record<string, unknown>> = Array.isArray(parsed.streams)
             ? parsed.streams
             : [];
-          const vStream = streams.find((s) => s.codec_type === 'video');
+
+          // Ignore embedded cover art (attached_pic === 1) when detecting real video streams
+          const vStream = streams.find((s) => {
+            if (s.codec_type !== 'video') return false;
+            const disp = s.disposition as Record<string, unknown> | undefined;
+            if (disp && disp.attached_pic === 1) return false;
+            const cName = String(s.codec_name || '').toLowerCase();
+            if ((cName === 'mjpeg' || cName === 'png') && audioExts.has(ext)) return false;
+            return true;
+          });
+
           const aStream = streams.find((s) => s.codec_type === 'audio');
 
           if (vStream) {
+            mediaType = 'video';
             if (typeof vStream.width === 'number') width = vStream.width;
             if (typeof vStream.height === 'number') height = vStream.height;
             if (typeof vStream.codec_name === 'string') videoCodec = vStream.codec_name;
@@ -328,13 +374,18 @@ export class FfmpegRunner {
               return null;
             };
             fps = parseRate(vStream.r_frame_rate) ?? parseRate(vStream.avg_frame_rate) ?? 30;
+          } else {
+            mediaType = 'audio';
           }
-          if (aStream && typeof aStream.codec_name === 'string') {
-            audioCodec = aStream.codec_name;
+
+          if (aStream) {
+            if (typeof aStream.codec_name === 'string') audioCodec = aStream.codec_name;
+            const sr = parseInt(String(aStream.sample_rate || '48000'), 10);
+            if (Number.isFinite(sr) && sr > 0) sampleRate = sr;
           }
         }
       } catch {
-        // Fallback to defaults if ffprobe fails on an unusual container
+        // Fallback to extension-based defaults
       }
     }
 
@@ -343,12 +394,465 @@ export class FfmpegRunner {
       fileName,
       fileSizeMB,
       duration,
+      mediaType,
       width,
       height,
       fps,
       videoCodec,
-      audioCodec
+      audioCodec,
+      sampleRate
     };
+  }
+
+  /**
+   * Executes Universal 4-Way Format Conversion:
+   * 1. Video -> Video (.mp4, .mov, .mkv, .webm, .gif) with Smart Copy (-c copy) zero-loss fast path
+   * 2. Video -> Audio (.wav, .mp3, .flac, .m4a, .ogg)
+   * 3. Audio -> Audio (.wav, .mp3, .flac, .m4a, .ogg)
+   * 4. Audio -> Video (.mp4, .mov, .mkv, .webm, .gif) with synthesized Waveform or Studio Slate
+   */
+  public async executeConverterJob(
+    jobId: string,
+    config: ConverterJobConfig,
+    hasNvenc: boolean,
+    onProgress: (ev: JobProgressEvent) => void
+  ): Promise<{
+    outputFilePath: string;
+    pills: OutputPill[];
+    usedSmartCopy?: boolean;
+  }> {
+    if (!this.isAvailable()) {
+      throw new Error('FFmpeg binary is not available. Check Settings -> Sidecar Binaries.');
+    }
+    if (!fs.existsSync(config.inputPath)) {
+      throw new Error(`Source file does not exist: ${config.inputPath}`);
+    }
+
+    const baseName =
+      path
+        .parse(config.fileName)
+        .name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+        .replace(/\s+/g, '_')
+        .slice(0, 56) || 'Vortex_Converted';
+
+    const targetExt = config.targetFormat;
+    const outPath = getNonCollidingFilePath(config.outputDir, `${baseName}_Converted`, targetExt);
+    try {
+    const safeDur = Math.max(1, config.duration || 15);
+    const useNvenc = Boolean(hasNvenc && config.useHardwareEncoder && this.hasEncoder('h264_nvenc'));
+
+    const targetIsAudio = ['wav', 'mp3', 'flac', 'm4a', 'ogg'].includes(targetExt);
+    const sourceIsAudio = config.mediaType === 'audio';
+
+    if (sourceIsAudio && targetExt === 'gif') {
+      throw new Error(
+        'Audio files cannot be converted to GIF format. Please select an audio format or video container.'
+      );
+    }
+
+    const inputHasAudio =
+      config.mediaType === 'audio' ||
+      (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none');
+
+    // Helper for Audio Codec flags
+    const buildAudioCodecArgs = (fmt: ConverterTargetFormat): string[] => {
+      const srArgs = ['-ar', String(config.audioSampleRate || 48000), '-ac', '2'];
+      const normArgs =
+        config.normalizeLoudness && safeDur >= 3
+          ? ['-af', 'loudnorm=I=-14:TP=-1.0:LRA=11']
+          : [];
+
+      switch (fmt) {
+        case 'wav':
+          return [...normArgs, '-c:a', 'pcm_s16le', ...srArgs];
+        case 'mp3':
+          return [...normArgs, '-c:a', 'libmp3lame', '-b:a', '320k', ...srArgs];
+        case 'flac':
+          return [...normArgs, '-c:a', 'flac', ...srArgs];
+        case 'm4a':
+          return [...normArgs, '-c:a', 'aac', '-b:a', '320k', ...srArgs];
+        case 'ogg':
+          return [...normArgs, '-c:a', 'libvorbis', '-q:a', '8', ...srArgs];
+        default:
+          return [...normArgs, '-c:a', 'aac', '-b:a', '256k', ...srArgs];
+      }
+    };
+
+    // CASE 1 & 2: Any Source (Video or Audio) -> Audio Output (.wav, .mp3, .flac, .m4a, .ogg)
+    if (targetIsAudio) {
+      if (!inputHasAudio) {
+        throw new Error(`Input video "${config.fileName}" contains no audio track to extract.`);
+      }
+
+      const args = [
+        '-y',
+        '-i',
+        config.inputPath,
+        '-vn',
+        ...buildAudioCodecArgs(targetExt),
+        outPath
+      ];
+
+      await this.runFfmpegWithProgress(
+        jobId,
+        args,
+        safeDur,
+        0,
+        100,
+        `Converting to ${targetExt.toUpperCase()} (${((config.audioSampleRate || 48000) / 1000).toFixed(1)}kHz${
+          config.normalizeLoudness && safeDur >= 3 ? ' -14 LUFS' : ''
+        })`,
+        onProgress
+      );
+
+      return {
+        outputFilePath: outPath,
+        pills: [
+          {
+            id: `conv_${targetExt}`,
+            label: `${path.basename(outPath)}`,
+            type: 'audio',
+            filePath: outPath,
+            fileName: path.basename(outPath)
+          }
+        ],
+        usedSmartCopy: false
+      };
+    }
+
+    // CASE 3: Video -> Animated GIF (High-Fidelity 256-Color Palette Filtergraph)
+    if (!sourceIsAudio && targetExt === 'gif') {
+      const gifDur = Math.min(safeDur, 30);
+      const gifFilter =
+        "fps=15,scale='min(640,iw)':-2:flags=lanczos,split[s0][s1];" +
+        '[s0]palettegen=max_colors=256[p];' +
+        '[s1][p]paletteuse=dither=bayer:bayer_scale=5';
+
+      await this.runFfmpegWithProgress(
+        jobId,
+        ['-y', '-t', String(gifDur), '-i', config.inputPath, '-vf', gifFilter, '-an', outPath],
+        gifDur,
+        0,
+        100,
+        'Synthesizing 256-color palette GIF (max 30s)...',
+        onProgress
+      );
+
+      return {
+        outputFilePath: outPath,
+        pills: [
+          {
+            id: 'conv_gif',
+            label: path.basename(outPath),
+            type: 'image',
+            filePath: outPath,
+            fileName: path.basename(outPath)
+          }
+        ],
+        usedSmartCopy: false
+      };
+    }
+
+    // CASE 4: Audio -> Video (.mp4, .mov, .mkv, .webm, .gif)
+    if (sourceIsAudio && !targetIsAudio) {
+      const vEncoderArgs =
+        targetExt === 'webm'
+          ? [
+              '-c:v',
+              'libvpx-vp9',
+              '-crf',
+              '30',
+              '-b:v',
+              '0',
+              '-pix_fmt',
+              'yuv420p',
+              '-row-mt',
+              '1',
+              '-cpu-used',
+              '4'
+            ]
+          : useNvenc
+            ? [
+                '-c:v',
+                'h264_nvenc',
+                '-preset',
+                'p4',
+                '-cq',
+                '20',
+                '-pix_fmt',
+                'yuv420p',
+                ...(targetExt === 'mp4' || targetExt === 'mov' ? ['-movflags', '+faststart'] : [])
+              ]
+            : [
+                '-c:v',
+                'libx264',
+                '-preset',
+                'fast',
+                '-crf',
+                '20',
+                '-pix_fmt',
+                'yuv420p',
+                ...(targetExt === 'mp4' || targetExt === 'mov' ? ['-movflags', '+faststart'] : [])
+              ];
+
+      if (config.audioToVideoMode === 'waveform') {
+        const waveFilter =
+          '[0:a:0]showwaves=s=1280x720:mode=cline:rate=30:colors=0x10B981|0x6366F1,format=yuv420p[v]';
+        const args = [
+          '-y',
+          '-i',
+          config.inputPath,
+          '-filter_complex',
+          waveFilter,
+          '-map',
+          '[v]',
+          '-map',
+          '0:a:0',
+          ...vEncoderArgs,
+          ...(targetExt === 'webm'
+            ? ['-c:a', 'libopus', '-b:a', '192k', '-ac', '2']
+            : ['-c:a', 'aac', '-b:a', '256k', '-ar', '48000', '-ac', '2']),
+          '-shortest',
+          outPath
+        ];
+
+        await this.runFfmpegWithProgress(
+          jobId,
+          args,
+          safeDur,
+          0,
+          100,
+          `Rendering Audio Waveform Video (.${targetExt})`,
+          onProgress
+        );
+      } else {
+        // Studio Dark Slate (1280x720 @ 30fps)
+        const args = [
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          'color=c=0x09090B:s=1280x720:r=30',
+          '-i',
+          config.inputPath,
+          '-map',
+          '0:v:0',
+          '-map',
+          '1:a:0',
+          ...vEncoderArgs,
+          ...(targetExt === 'webm'
+            ? ['-c:a', 'libopus', '-b:a', '192k', '-ac', '2']
+            : ['-c:a', 'aac', '-b:a', '256k', '-ar', '48000', '-ac', '2']),
+          '-shortest',
+          outPath
+        ];
+
+        await this.runFfmpegWithProgress(
+          jobId,
+          args,
+          safeDur,
+          0,
+          100,
+          `Wrapping Audio in Studio Slate Container (.${targetExt})`,
+          onProgress
+        );
+      }
+
+      return {
+        outputFilePath: outPath,
+        pills: [
+          {
+            id: `conv_a2v_${targetExt}`,
+            label: path.basename(outPath),
+            type: 'video',
+            filePath: outPath,
+            fileName: path.basename(outPath)
+          }
+        ],
+        usedSmartCopy: false
+      };
+    }
+
+    // CASE 5: Video -> Video (.mp4, .mov, .mkv, .webm)
+    const vCodec = (config.videoCodec || '').toLowerCase();
+    const aCodec = (config.audioCodec || '').toLowerCase();
+
+    const canSmartRemux = (() => {
+      if (!config.smartCopy || config.normalizeLoudness) return false;
+      if (targetExt === 'mov') {
+        const vOk = ['h264', 'avc1', 'hevc', 'h265', 'prores'].includes(vCodec);
+        const aOk =
+          !inputHasAudio ||
+          ['aac', 'mp3', 'alac', 'pcm_s16le', 'pcm_s24le'].includes(aCodec);
+        return vOk && aOk;
+      }
+      if (targetExt === 'mp4') {
+        const vOk = ['h264', 'avc1', 'hevc', 'h265'].includes(vCodec);
+        const aOk = !inputHasAudio || ['aac', 'mp3', 'alac'].includes(aCodec);
+        return vOk && aOk;
+      }
+      if (targetExt === 'mkv') {
+        return true; // Matroska accepts virtually all video/audio streams losslessly
+      }
+      if (targetExt === 'webm') {
+        const vOk = ['vp8', 'vp9', 'av1'].includes(vCodec);
+        const aOk = !inputHasAudio || ['opus', 'vorbis'].includes(aCodec);
+        return vOk && aOk;
+      }
+      return false;
+    })();
+
+    if (canSmartRemux) {
+      try {
+        const remuxArgs = [
+          '-y',
+          '-i',
+          config.inputPath,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a?',
+          '-sn',
+          '-dn',
+          '-c',
+          'copy',
+          ...(targetExt === 'mp4' || targetExt === 'mov' ? ['-movflags', '+faststart'] : []),
+          outPath
+        ];
+
+        await this.runFfmpegWithProgress(
+          jobId,
+          remuxArgs,
+          safeDur,
+          0,
+          100,
+          `Smart Copy: Zero-loss container remux to .${targetExt}`,
+          onProgress
+        );
+
+        return {
+          outputFilePath: outPath,
+          pills: [
+            {
+              id: `conv_remux_${targetExt}`,
+              label: path.basename(outPath),
+              type: 'video',
+              filePath: outPath,
+              fileName: path.basename(outPath)
+            }
+          ],
+          usedSmartCopy: true
+        };
+      } catch (remuxErr) {
+        if (
+          this.cancelledJobs.has(jobId) ||
+          /cancelled by user/i.test((remuxErr as Error)?.message ?? '')
+        ) {
+          throw remuxErr;
+        }
+        // Clean up partial failed remux container and fall back to transcode
+        if (fs.existsSync(outPath)) {
+          try {
+            fs.unlinkSync(outPath);
+          } catch {
+            // Ignore unlink error
+          }
+        }
+      }
+    }
+
+    // Full Video -> Video Transcode Path
+    const vEncoderArgs =
+      targetExt === 'webm'
+        ? [
+            '-c:v',
+            'libvpx-vp9',
+            '-crf',
+            '28',
+            '-b:v',
+            '0',
+            '-pix_fmt',
+            'yuv420p',
+            '-row-mt',
+            '1',
+            '-cpu-used',
+            '4'
+          ]
+        : useNvenc
+          ? [
+              '-c:v',
+              'h264_nvenc',
+              '-preset',
+              'p4',
+              '-cq',
+              '19',
+              '-pix_fmt',
+              'yuv420p',
+              ...(targetExt === 'mp4' || targetExt === 'mov' ? ['-movflags', '+faststart'] : [])
+            ]
+          : [
+              '-c:v',
+              'libx264',
+              '-preset',
+              'fast',
+              '-crf',
+              '18',
+              '-pix_fmt',
+              'yuv420p',
+              ...(targetExt === 'mp4' || targetExt === 'mov' ? ['-movflags', '+faststart'] : [])
+            ];
+
+    const aEncoderArgs = !inputHasAudio
+      ? ['-an']
+      : targetExt === 'webm'
+        ? [
+            ...(config.normalizeLoudness && safeDur >= 3
+              ? ['-af', 'loudnorm=I=-14:TP=-1.0:LRA=11']
+              : []),
+            '-c:a',
+            'libopus',
+            '-b:a',
+            '192k',
+            '-ac',
+            '2'
+          ]
+        : buildAudioCodecArgs('m4a');
+
+    await this.runFfmpegWithProgress(
+      jobId,
+      [
+        '-y',
+        '-i',
+        config.inputPath,
+        '-vf',
+        'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        ...vEncoderArgs,
+        ...aEncoderArgs,
+        outPath
+      ],
+      safeDur,
+      0,
+      100,
+      `Transcoding to .${targetExt.toUpperCase()} via ${targetExt === 'webm' ? 'VP9' : useNvenc ? 'NVENC' : 'CPU libx264'}`,
+      onProgress
+    );
+
+    return {
+      outputFilePath: outPath,
+      pills: [
+        {
+          id: `conv_vid_${targetExt}`,
+          label: path.basename(outPath),
+          type: 'video',
+          filePath: outPath,
+          fileName: path.basename(outPath)
+        }
+      ],
+      usedSmartCopy: false
+    };
+    } finally {
+      releaseFilePath(outPath);
+    }
   }
 
   /**
@@ -387,17 +891,15 @@ export class FfmpegRunner {
         .replace(/\s+/g, '_')
         .slice(0, 56) || 'Vortex_Fixer';
 
-    const jobFolder = path.join(config.outputDir, `${baseName}_${jobId.slice(0, 6)}`);
-    if (!fs.existsSync(jobFolder)) {
-      fs.mkdirSync(jobFolder, { recursive: true });
-    }
-
     const useNvenc = hasNvenc && config.useHardwareEncoder;
     const safeDur = Math.max(1, config.duration || 15);
+    let directOutPath: string | null = null;
 
-    if (config.preset === 'deflicker') {
-      const outPath = path.join(jobFolder, `${baseName}_Deflickered.mp4`);
-      const winSize = Math.max(3, Math.min(15, config.deflickerWindow || 7));
+    try {
+      if (config.preset === 'deflicker') {
+        const outPath = getNonCollidingFilePath(config.outputDir, `${baseName}_Deflickered`, 'mp4');
+        directOutPath = outPath;
+        const winSize = Math.max(3, Math.min(15, config.deflickerWindow || 7));
       const vEncoderArgs = useNvenc
         ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '19']
         : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
@@ -442,13 +944,18 @@ export class FfmpegRunner {
 
     if (config.preset === 'target-size') {
       const targetMB = Math.max(2, config.targetSizeMB || 10);
-      const outPath = path.join(jobFolder, `${baseName}_${targetMB}MB.mp4`);
-      const audioKbps = 128;
+      const outPath = getNonCollidingFilePath(config.outputDir, `${baseName}_${targetMB}MB`, 'mp4');
+      directOutPath = outPath;
+      const hasAudio = config.audioCodec !== undefined
+        ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
+        : this.hasAudioStream(config.inputPath);
+      const audioKbps = hasAudio ? 128 : 0;
       // Reserve 6% container overhead margin so output strictly stays under the cap
       const totalTargetKbits = targetMB * 8192 * 0.94;
       const videoKbps = Math.max(150, Math.floor(totalTargetKbits / safeDur - audioKbps));
       const maxRateKbps = Math.round(videoKbps * 1.12);
       const bufSizeKbps = videoKbps * 2;
+      const audioArgs = hasAudio ? ['-c:a', 'aac', '-b:a', `${audioKbps}k`] : ['-an'];
 
       if (useNvenc) {
         await this.runFfmpegWithProgress(
@@ -469,10 +976,7 @@ export class FfmpegRunner {
             `${bufSizeKbps}k`,
             '-pix_fmt',
             'yuv420p',
-            '-c:a',
-            'aac',
-            '-b:a',
-            `${audioKbps}k`,
+            ...audioArgs,
             outPath
           ],
           safeDur,
@@ -482,78 +986,74 @@ export class FfmpegRunner {
           onProgress
         );
       } else {
-        // 2-Pass CPU libx264 with isolated per-job passlogfile (fixes DS-6 collision risk)
-        const passLogPrefix = path.join(jobFolder, `ffmpeg2pass_${jobId}`);
+        // 2-Pass CPU libx264 with isolated per-job passlogfile in tmpdir
+        const passLogPrefix = path.join(os.tmpdir(), `ffmpeg2pass_${jobId}`);
         const nullSink = process.platform === 'win32' ? 'NUL' : '/dev/null';
 
-        await this.runFfmpegWithProgress(
-          jobId,
-          [
-            '-y',
-            '-i',
-            config.inputPath,
-            '-c:v',
-            'libx264',
-            '-b:v',
-            `${videoKbps}k`,
-            '-pass',
-            '1',
-            '-passlogfile',
-            passLogPrefix,
-            '-an',
-            '-f',
-            'null',
-            nullSink
-          ],
-          safeDur,
-          0,
-          48,
-          `Pass 1/2: Analyzing bitrate envelope (${videoKbps} kbps)`,
-          onProgress
-        );
-
-        await this.runFfmpegWithProgress(
-          jobId,
-          [
-            '-y',
-            '-i',
-            config.inputPath,
-            '-c:v',
-            'libx264',
-            '-b:v',
-            `${videoKbps}k`,
-            '-maxrate',
-            `${maxRateKbps}k`,
-            '-bufsize',
-            `${bufSizeKbps}k`,
-            '-pass',
-            '2',
-            '-passlogfile',
-            passLogPrefix,
-            '-pix_fmt',
-            'yuv420p',
-            '-c:a',
-            'aac',
-            '-b:a',
-            `${audioKbps}k`,
-            outPath
-          ],
-          safeDur,
-          50,
-          100,
-          `Pass 2/2: Encoding ${targetMB}MB master (${videoKbps} kbps)`,
-          onProgress
-        );
-
-        // Clean up temporary 2-pass log artifacts
         try {
-          for (const f of fs.readdirSync(jobFolder)) {
-            if (f.startsWith(`ffmpeg2pass_${jobId}`)) {
-              fs.unlinkSync(path.join(jobFolder, f));
-            }
+          await this.runFfmpegWithProgress(
+            jobId,
+            [
+              '-y',
+              '-i',
+              config.inputPath,
+              '-c:v',
+              'libx264',
+              '-b:v',
+              `${videoKbps}k`,
+              '-pass',
+              '1',
+              '-passlogfile',
+              passLogPrefix,
+              '-an',
+              '-f',
+              'null',
+              nullSink
+            ],
+            safeDur,
+            0,
+            48,
+            `Pass 1/2: Analyzing bitrate envelope (${videoKbps} kbps)`,
+            onProgress
+          );
+
+          await this.runFfmpegWithProgress(
+            jobId,
+            [
+              '-y',
+              '-i',
+              config.inputPath,
+              '-c:v',
+              'libx264',
+              '-b:v',
+              `${videoKbps}k`,
+              '-maxrate',
+              `${maxRateKbps}k`,
+              '-bufsize',
+              `${bufSizeKbps}k`,
+              '-pass',
+              '2',
+              '-passlogfile',
+              passLogPrefix,
+              '-pix_fmt',
+              'yuv420p',
+              ...audioArgs,
+              outPath
+            ],
+            safeDur,
+            50,
+            100,
+            `Pass 2/2: Encoding ${targetMB}MB master (${videoKbps} kbps)`,
+            onProgress
+          );
+        } finally {
+          // Direct deletion of passlog files without scanning full os.tmpdir()
+          for (const suffix of ['-0.log', '-0.log.mbtree', '-0.log.temp']) {
+            try {
+              const p = `${passLogPrefix}${suffix}`;
+              if (fs.existsSync(p)) fs.unlinkSync(p);
+            } catch {}
           }
-        } catch {
-          // Ignore cleanup errors
         }
       }
 
@@ -572,7 +1072,8 @@ export class FfmpegRunner {
     }
 
     if (config.preset === 'prores-proxy') {
-      const outPath = path.join(jobFolder, `${baseName}_ProRes_Proxy.mov`);
+      const outPath = getNonCollidingFilePath(config.outputDir, `${baseName}_ProRes_Proxy`, 'mov');
+      directOutPath = outPath;
       await this.runFfmpegWithProgress(
         jobId,
         [
@@ -634,7 +1135,22 @@ export class FfmpegRunner {
         'yt-shorts': 'YT_Shorts'
       };
       const platformTag = platformTagMap[options.platform] || 'Social';
-      const outPath = path.join(jobFolder, `${baseName}_${platformTag}_Armored.mp4`);
+
+      // Keep subfolder if 2 files output (clean master + simulated IG compression preview); direct export if 1 file
+      const isMultiOutput = Boolean(options.simulateIgCompression);
+      const jobFolder = isMultiOutput
+        ? path.join(config.outputDir, `${baseName}_${jobId.slice(0, 6)}`)
+        : config.outputDir;
+      if (isMultiOutput && !fs.existsSync(jobFolder)) {
+        fs.mkdirSync(jobFolder, { recursive: true });
+      }
+
+      const outPath = isMultiOutput
+        ? path.join(jobFolder, `${baseName}_${platformTag}_Armored.mp4`)
+        : getNonCollidingFilePath(config.outputDir, `${baseName}_${platformTag}_Armored`, 'mp4');
+      if (!isMultiOutput) {
+        directOutPath = outPath;
+      }
 
       // 1. High-precision filter chain with safe even-dimension padding
       const filterParts: string[] = [REEL_SCALE_PAD_FILTER];
@@ -745,7 +1261,9 @@ export class FfmpegRunner {
         : [];
 
       // 4. Loudness normalization; skipped for silent inputs (no audio stream) and clips under 3s
-      const hasAudio = this.hasAudioStream(config.inputPath);
+      const hasAudio = config.audioCodec !== undefined
+        ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
+        : this.hasAudioStream(config.inputPath);
       const audioArgs = !hasAudio
         ? ['-an']
         : safeDur >= 3
@@ -857,7 +1375,19 @@ export class FfmpegRunner {
       };
     }
 
-    // Preset: 'silence-xml' (Dead-Air Silence Chopper -> Premiere Pro FCP7 XML + Jump-Cut Preview MP4)
+    // Preset: 'silence-xml' (Dead-Air Silence Chopper -> Premiere Pro FCP7 XML + Jump-Cut Preview MP4: 2 output files)
+    const hasAudio = config.audioCodec !== undefined
+      ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
+      : this.hasAudioStream(config.inputPath);
+    if (!hasAudio) {
+      throw new Error('Video contains no audio track for silence detection.');
+    }
+
+    const jobFolder = path.join(config.outputDir, `${baseName}_${jobId.slice(0, 6)}`);
+    if (!fs.existsSync(jobFolder)) {
+      fs.mkdirSync(jobFolder, { recursive: true });
+    }
+
     const xmlPath = path.join(jobFolder, `${baseName}_Premiere_Cuts.xml`);
     const jumpCutPath = path.join(jobFolder, `${baseName}_JumpCut.mp4`);
 
@@ -939,6 +1469,11 @@ export class FfmpegRunner {
       outputFilePath: xmlPath,
       pills
     };
+    } finally {
+      if (directOutPath) {
+        releaseFilePath(directOutPath);
+      }
+    }
   }
 
   private runFfmpegWithProgress(
@@ -1144,7 +1679,7 @@ export class FfmpegRunner {
     const fps = Math.max(1, Math.round(rawFps));
     const width = config.width || 1920;
     const height = config.height || 1080;
-    const totalSourceFrames = Math.max(1, Math.round(config.duration * rawFps));
+    const totalSourceFrames = Math.max(1, Math.round(config.duration * fps));
     // Premiere Pro / FCP7 XML expects file://localhost/D%3a/... on Windows (MJ-3)
     const rawFileUrl = pathToFileURL(config.inputPath).toString();
     const fileUrl =
@@ -1163,8 +1698,8 @@ export class FfmpegRunner {
     const audioClipItems: string[] = [];
 
     segments.forEach((seg, idx) => {
-      const inFrame = Math.max(0, Math.round(seg.start * rawFps));
-      const outFrame = Math.max(inFrame + 1, Math.round(seg.end * rawFps));
+      const inFrame = Math.max(0, Math.round(seg.start * fps));
+      const outFrame = Math.max(inFrame + 1, Math.round(seg.end * fps));
       const clipDurFrames = outFrame - inFrame;
       const startTimeline = timelineCursor;
       const endTimeline = timelineCursor + clipDurFrames;

@@ -110,10 +110,10 @@ export const UrlCommandBar: React.FC = () => {
             {isProbing ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Inspecting…</span>
+                <span>Loading…</span>
               </>
             ) : (
-              <span>Inspect</span>
+              <span>Load Link</span>
             )}
           </button>
         </div>

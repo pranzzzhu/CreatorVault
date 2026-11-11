@@ -54,10 +54,17 @@ interface StemAudioMixerProps {
 }
 
 const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
-  const audioPills = pills.filter(
+  const stemPills = pills.filter(
     (p) =>
-      p.filePath.toLowerCase().endsWith('.wav') ||
-      p.filePath.toLowerCase().endsWith('.mp3')
+      p.type !== 'audio' &&
+      p.type !== 'video' &&
+      p.type !== 'proxy' &&
+      (p.type === 'vocals' ||
+        p.type === 'instrumental' ||
+        p.type === 'drums' ||
+        p.type === 'bass' ||
+        p.type === 'other' ||
+        (p.filePath.toLowerCase().endsWith('.wav') && !p.id.toLowerCase().includes('master')))
   );
   const [isPlaying, setIsPlaying] = useState(false);
   const [soloId, setSoloId] = useState<string | null>(null);
@@ -66,7 +73,7 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
 
   useEffect(() => {
-    for (const pill of audioPills) {
+    for (const pill of stemPills) {
       const el = audioRefs.current[pill.id];
       if (!el) continue;
       if (soloId) {
@@ -75,7 +82,7 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
         el.muted = Boolean(mutedIds[pill.id]);
       }
     }
-  }, [soloId, mutedIds, audioPills]);
+  }, [soloId, mutedIds, stemPills]);
 
   useEffect(() => {
     return () => {
@@ -87,7 +94,7 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
     };
   }, []);
 
-  if (audioPills.length === 0) return null;
+  if (stemPills.length <= 1) return null;
 
   const togglePlayAll = () => {
     if (isPlaying) {
@@ -126,7 +133,7 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
             {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
           </button>
           <span className="text-xs font-medium text-base-content">
-            Stem audition mixer
+            Preview split tracks
           </span>
         </div>
 
@@ -136,7 +143,7 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
       </div>
 
       <div className="divide-y divide-base-300 border-y border-base-300">
-        {audioPills.map((pill, pillIdx) => {
+        {stemPills.map((pill, pillIdx) => {
           const isMuted = soloId ? pill.id !== soloId : Boolean(mutedIds[pill.id]);
           const isSolo = soloId === pill.id;
           const fileUrl = `vortex-media://local/${encodeURIComponent(pill.filePath)}`;
@@ -417,7 +424,7 @@ export const JobQueueList: React.FC = () => {
       <div className="flex items-center justify-between px-1">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold text-base-content/80">
-            Timeline queue ({jobs.length})
+            Finished Files & Downloads ({jobs.length})
           </span>
           <div
             className="tooltip tooltip-right"
@@ -433,7 +440,7 @@ export const JobQueueList: React.FC = () => {
           </div>
         </div>
         <span className="text-xs text-base-content/50">
-          Native OS drag-out active
+          Drag any file button below into your editor
         </span>
       </div>
 
@@ -441,10 +448,10 @@ export const JobQueueList: React.FC = () => {
         <div className="card bg-base-200 border border-dashed border-base-300 p-6 flex flex-row items-center justify-between">
           <div>
             <p className="text-xs font-medium text-base-content">
-              No media jobs in queue yet
+              No files yet
             </p>
             <p className="text-xs text-base-content/60 mt-0.5">
-              Paste a URL above or pick a sample preset to stage a clip.
+              Paste a link above or drop a file in any tab to get started.
             </p>
           </div>
           <span className="badge badge-sm badge-ghost">Idle</span>

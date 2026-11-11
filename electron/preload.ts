@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   BinaryName,
   BrowserSource,
+  ConverterJobConfig,
   FixerJobConfig,
   JobConfig,
   JobProgressEvent,
@@ -25,6 +26,10 @@ const api: VortexApi = {
   probeLocalImage: (filePath: string) => ipcRenderer.invoke('vector:probe', filePath),
   startVectorJob: (jobId: string, config: VectorJobConfig) =>
     ipcRenderer.invoke('vector:start', jobId, config),
+  selectMediaFiles: () => ipcRenderer.invoke('dialog:select-media-files'),
+  probeLocalMedia: (filePath: string) => ipcRenderer.invoke('converter:probe', filePath),
+  startConverterJob: (jobId: string, config: ConverterJobConfig) =>
+    ipcRenderer.invoke('converter:start', jobId, config),
   getPathForDroppedFile: (file: File) => {
     try {
       return webUtils.getPathForFile(file);
@@ -37,9 +42,11 @@ const api: VortexApi = {
     ipcRenderer.send('ondragstart', filePath);
   },
   openFolder: (filePath: string) => ipcRenderer.invoke('shell:open-folder', filePath),
-  selectOutputDirectory: () => ipcRenderer.invoke('dialog:select-dir'),
+  selectOutputDirectory: (currentDir?: string) =>
+    ipcRenderer.invoke('dialog:select-dir', currentDir),
   windowControl: (action: 'minimize' | 'maximize' | 'close') =>
     ipcRenderer.invoke('window:control', action),
+  setTheme: (theme: string) => ipcRenderer.invoke('window:set-theme', theme),
   setZoomFactor: (factor: number) => ipcRenderer.invoke('window:set-zoom', factor),
   getZoomFactor: () => ipcRenderer.invoke('window:get-zoom'),
   onJobProgress: (callback: (data: JobProgressEvent) => void) => {

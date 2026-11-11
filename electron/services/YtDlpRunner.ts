@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
@@ -10,6 +10,7 @@ import type {
   SourcePlatform
 } from '../../src/types/media';
 import { killProcessTree } from './BinaryManager';
+import { getNonCollidingFilePath, releaseFilePath } from './FileUtils';
 import type { FfmpegRunner } from './FfmpegRunner';
 
 export class YtDlpRunner {
@@ -39,55 +40,57 @@ export class YtDlpRunner {
     return [
       {
         id: '4K',
-        label: '2160p 4K Master',
+        label: '4K Ultra HD (2160p)',
         resolution: '3840x2160',
-        codecBadge: editReadyMode ? 'H.264 / MP4' : 'VP9 / MKV',
+        codecBadge: editReadyMode ? 'MP4' : 'MKV',
         isAudioOnly: false
       },
       {
         id: '1440p',
-        label: '1440p QHD',
+        label: '2K QHD (1440p)',
         resolution: '2560x1440',
-        codecBadge: editReadyMode ? 'H.264 / MP4' : 'VP9 / WEBM',
+        codecBadge: editReadyMode ? 'MP4' : 'WEBM',
         isAudioOnly: false
       },
       {
         id: '1080p',
         label: '1080p Full HD',
         resolution: '1920x1080',
-        codecBadge: 'H.264 / AAC',
+        codecBadge: 'MP4',
         isAudioOnly: false
       },
       {
         id: '720p',
-        label: '720p Proxy HD',
+        label: '720p HD',
         resolution: '1280x720',
-        codecBadge: 'H.264 / AAC',
+        codecBadge: 'MP4',
         isAudioOnly: false
       },
       {
         id: 'audio-wav',
-        label: 'Audio Master (48kHz PCM)',
-        codecBadge: 'WAV 16-BIT',
+        label: 'WAV Audio (Best for Editing)',
+        codecBadge: 'WAV',
         isAudioOnly: true
       },
       {
         id: 'audio-mp3',
-        label: 'Audio Compressed (320kbps)',
-        codecBadge: 'MP3 320K',
+        label: 'MP3 Audio (Small Size)',
+        codecBadge: 'MP3',
         isAudioOnly: true
       }
     ];
   }
 
   public static formatSecondsToTimestamp(seconds: number): string {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = (seconds % 60).toFixed(2);
+    const safe = Math.max(0, seconds);
+    const totalHundredths = Math.round(safe * 100);
+    const totalSecs = Math.floor(totalHundredths / 100);
+    const hundredths = String(totalHundredths % 100).padStart(2, '0');
+    const hrs = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
     const pad = (n: number) => String(n).padStart(2, '0');
-    const secParts = secs.split('.');
-    const paddedSecs = `${pad(parseInt(secParts[0], 10))}.${secParts[1]}`;
-    return `${pad(hrs)}:${pad(mins)}:${paddedSecs}`;
+    return `${pad(hrs)}:${pad(mins)}:${pad(secs)}.${hundredths}`;
   }
 
   public async probeUrl(
@@ -147,6 +150,18 @@ export class YtDlpRunner {
     }
   }
 
+  private isNodeAvailable(): boolean {
+    try {
+      const res = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['node'], {
+        windowsHide: true,
+        timeout: 1500
+      });
+      return res.status === 0;
+    } catch {
+      return false;
+    }
+  }
+
   private runYtDlpProbe(
     targetUrl: string,
     browserCookies: BrowserSource
@@ -160,10 +175,9 @@ export class YtDlpRunner {
       '--ignore-no-formats-error'
     ];
 
-    if (isYouTube) {
-      // Enable Node.js as the YouTube EJS signature runtime so yt-dlp 2026+ unlocks all streams
+    if (isYouTube && this.isNodeAvailable()) {
       args.push('--js-runtimes', 'node');
-    } else {
+    } else if (!isYouTube) {
       // Pass a clean desktop User-Agent only for non-YouTube platforms (e.g. Instagram Reels)
       args.push(
         '--user-agent',
@@ -275,9 +289,9 @@ export class YtDlpRunner {
     config: JobConfig,
     onProgress: (ev: JobProgressEvent) => void
   ): Promise<{ outputFilePath: string; usedSimulation: boolean }> {
-    const jobFolder = path.join(config.outputDir, `${this.sanitizeFilename(config.title)}_${jobId.slice(0, 6)}`);
-    if (!fs.existsSync(jobFolder)) {
-      fs.mkdirSync(jobFolder, { recursive: true });
+    if (this.cancelledJobs.has(jobId)) {
+      this.cancelledJobs.delete(jobId);
+      throw new Error('Job cancelled by user');
     }
 
     const isAudioOnly = config.quality === 'audio-wav' || config.quality === 'audio-mp3';
@@ -292,7 +306,22 @@ export class YtDlpRunner {
     const baseFileName = `${this.sanitizeFilename(config.title)}${
       config.trimEnabled ? `_${Math.floor(config.startTime)}s-${Math.floor(config.endTime)}s` : ''
     }`;
-    const expectedOutputPath = path.join(jobFolder, `${baseFileName}.${targetExt}`);
+
+    // If stemMode is off, export directly into config.outputDir with collision resolution (no extra subfolder)
+    const isDirectExport = config.stemMode === 'off';
+    const jobFolder = isDirectExport
+      ? config.outputDir
+      : path.join(config.outputDir, `${this.sanitizeFilename(config.title)}_${jobId.slice(0, 6)}`);
+
+    if (!fs.existsSync(jobFolder)) {
+      fs.mkdirSync(jobFolder, { recursive: true });
+    }
+
+    const expectedOutputPath = isDirectExport
+      ? getNonCollidingFilePath(config.outputDir, baseFileName, targetExt)
+      : path.join(jobFolder, `${baseFileName}.${targetExt}`);
+
+    const chosenBaseName = path.parse(expectedOutputPath).name;
 
     // If yt-dlp is unavailable and simulation fallback is allowed, synthesize a real playable asset
     if (!this.isYtDlpAvailable()) {
@@ -305,7 +334,7 @@ export class YtDlpRunner {
     const ytDlpBin = this.getYtDlpPath();
     const args: string[] = [];
 
-    if (config.url.includes('youtube.com/') || config.url.includes('youtu.be/')) {
+    if ((config.url.includes('youtube.com/') || config.url.includes('youtu.be/')) && this.isNodeAvailable()) {
       args.push('--js-runtimes', 'node');
     }
 
@@ -327,14 +356,28 @@ export class YtDlpRunner {
       const maxH = heightMap[config.quality] || 1080;
 
       if (config.editReadyMode) {
-        args.push(
-          '-f',
-          `bestvideo[height<=${maxH}][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo[height<=${maxH}]+bestaudio/best`,
-          '--merge-output-format',
-          'mp4',
-          '--remux-video',
-          'mp4'
-        );
+        // For 4K/1440p, YouTube provides VP9/AV1. Recode to H.264 MP4 so NLEs (Premiere/DaVinci) can import.
+        // For 1080p/720p, YouTube already provides native H.264 (avc1), so use --remux-video mp4 for instant lossless copy.
+        if (maxH >= 1440) {
+          args.push(
+            '-f',
+            `bestvideo[height<=${maxH}]+bestaudio/best`,
+            '--merge-output-format',
+            'mp4',
+            '--recode-video',
+            'mp4'
+          );
+        } else {
+          // Prefers native H.264/AAC for instant copy; recodes to standard MP4 if falling back to VP9/Opus
+          args.push(
+            '-f',
+            `bestvideo[height<=${maxH}][ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/bestvideo[height<=${maxH}]+bestaudio/best`,
+            '--merge-output-format',
+            'mp4',
+            '--recode-video',
+            'mp4'
+          );
+        }
       } else {
         args.push(
           '-f',
@@ -345,11 +388,23 @@ export class YtDlpRunner {
       }
     }
 
-    // Visual Section Clipper (--download-sections "*START-END" --force-keyframes-at-cuts)
-    if (config.trimEnabled && config.endTime > config.startTime) {
+    // Always use 4 parallel fragment connections for speed
+    args.push('--concurrent-fragments', '4');
+
+    // Visual Section Clipper: Downloads ONLY the requested timestamp slice over HTTP range requests
+    if (config.trimEnabled) {
+      if (config.endTime <= config.startTime) {
+        throw new Error(
+          `Invalid trim range: end time (${config.endTime}s) must be greater than start time (${config.startTime}s)`
+        );
+      }
       const startStr = YtDlpRunner.formatSecondsToTimestamp(config.startTime);
       const endStr = YtDlpRunner.formatSecondsToTimestamp(config.endTime);
-      args.push('--download-sections', `*${startStr}-${endStr}`, '--force-keyframes-at-cuts');
+      args.push(
+        '--download-sections',
+        `*${startStr}-${endStr}`,
+        '--force-keyframes-at-cuts'
+      );
     }
 
     // Edit-Ready PNG Thumbnail conversion
@@ -367,7 +422,7 @@ export class YtDlpRunner {
       args.push('--ffmpeg-location', this.getFfmpegPath());
     }
 
-    const outputTemplate = path.join(jobFolder, `${baseFileName}.%(ext)s`);
+    const outputTemplate = path.join(jobFolder, `${chosenBaseName}.%(ext)s`);
     args.push(
       '--newline',
       '--no-playlist',
@@ -432,6 +487,10 @@ export class YtDlpRunner {
 
       proc.on('error', (err) => {
         this.activeProcesses.delete(jobId);
+        if (isDirectExport) {
+          releaseFilePath(expectedOutputPath);
+          this.cleanupPartialFiles(jobFolder, chosenBaseName);
+        }
         if (this.cancelledJobs.has(jobId)) {
           this.cancelledJobs.delete(jobId);
           reject(new Error('Job cancelled by user'));
@@ -451,23 +510,60 @@ export class YtDlpRunner {
 
         if (this.cancelledJobs.has(jobId)) {
           this.cancelledJobs.delete(jobId);
+          if (isDirectExport) {
+            releaseFilePath(expectedOutputPath);
+            this.cleanupPartialFiles(jobFolder, chosenBaseName);
+          }
           reject(new Error('Job cancelled by user'));
           return;
         }
 
         if (code === 0) {
-          // Locate generated file in jobFolder
-          const files = fs.existsSync(jobFolder) ? fs.readdirSync(jobFolder) : [];
-          const mediaFile = files.find(
-            (f) =>
-              f.startsWith(baseFileName) &&
-              !f.endsWith('.part') &&
-              !f.endsWith('.ytdl') &&
-              !f.endsWith('.png') &&
-              !f.endsWith('.webp')
-          );
+          const mediaExts = new Set([
+            '.mp4',
+            '.mkv',
+            '.webm',
+            '.wav',
+            '.mp3',
+            '.m4a',
+            '.flac',
+            '.opus',
+            '.ogg'
+          ]);
 
-          const finalPath = mediaFile ? path.join(jobFolder, mediaFile) : expectedOutputPath;
+          let finalPath = '';
+          if (fs.existsSync(expectedOutputPath)) {
+            finalPath = expectedOutputPath;
+          } else {
+            const files = fs.existsSync(jobFolder) ? fs.readdirSync(jobFolder) : [];
+            let mediaFile = files.find((f) => {
+              const parsed = path.parse(f);
+              return (
+                parsed.name === chosenBaseName &&
+                mediaExts.has(parsed.ext.toLowerCase()) &&
+                !f.endsWith('.part') &&
+                !f.endsWith('.ytdl')
+              );
+            });
+
+            if (!mediaFile && !isDirectExport) {
+              mediaFile = files.find(
+                (f) =>
+                  !f.endsWith('.part') &&
+                  !f.endsWith('.ytdl') &&
+                  !f.endsWith('.png') &&
+                  !f.endsWith('.webp') &&
+                  mediaExts.has(path.extname(f).toLowerCase())
+              );
+            }
+
+            finalPath = mediaFile ? path.join(jobFolder, mediaFile) : expectedOutputPath;
+          }
+
+          if (isDirectExport) {
+            releaseFilePath(expectedOutputPath);
+          }
+
           if (!fs.existsSync(finalPath)) {
             reject(new Error('Download completed, but output media file was not found on disk.'));
             return;
@@ -475,7 +571,34 @@ export class YtDlpRunner {
 
           resolve({ outputFilePath: finalPath, usedSimulation: false });
         } else {
-          reject(new Error(stderrLog.trim() || `yt-dlp exited with code ${code}`));
+          if (isDirectExport) {
+            releaseFilePath(expectedOutputPath);
+            this.cleanupPartialFiles(jobFolder, chosenBaseName);
+          }
+          const fullErr = stderrLog.trim();
+          const isCookieLocked =
+            /(cookie.*locked|cannot access.*cookie|Could not copy Chrome cookie database|database is locked)/i.test(
+              fullErr
+            );
+
+          // Fallback if browser cookie database is locked during download
+          if (
+            config.browserCookies &&
+            config.browserCookies !== 'none' &&
+            isCookieLocked
+          ) {
+            const retryConfig = { ...config, browserCookies: 'none' as const };
+            onProgress({
+              jobId,
+              stage: 'downloading',
+              progress: 0,
+              statusMessage: 'Browser cookie database locked. Retrying anonymously...'
+            });
+            // Recursive retry with cookies disabled and cloned config
+            this.executeDownload(jobId, retryConfig, onProgress).then(resolve).catch(reject);
+            return;
+          }
+          reject(new Error(fullErr || `yt-dlp exited with code ${code}`));
         }
       });
     });
@@ -514,7 +637,27 @@ export class YtDlpRunner {
       : 6;
     const writtenPath = this.ffmpegRunner.writeValidSimulatedMedia(outputPath, clipLen, 220);
 
+    if (config.stemMode === 'off') {
+      releaseFilePath(outputPath);
+    }
+
     return { outputFilePath: writtenPath, usedSimulation: true };
+  }
+
+  private cleanupPartialFiles(folder: string, baseName: string): void {
+    try {
+      if (!fs.existsSync(folder)) return;
+      for (const f of fs.readdirSync(folder)) {
+        if (
+          f.startsWith(baseName) &&
+          (f.endsWith('.part') || f.endsWith('.ytdl') || f.endsWith('.temp'))
+        ) {
+          try {
+            fs.unlinkSync(path.join(folder, f));
+          } catch {}
+        }
+      }
+    } catch {}
   }
 
   public cancelJob(jobId: string): boolean {

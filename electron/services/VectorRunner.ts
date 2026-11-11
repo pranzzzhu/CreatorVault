@@ -9,6 +9,7 @@ import type {
   VectorJobConfig
 } from '../../src/types/media';
 import { killProcessTree } from './BinaryManager';
+import { getNonCollidingFilePath, releaseFilePath } from './FileUtils';
 
 export class VectorRunner {
   private activeProcesses = new Map<string, ChildProcess>();
@@ -119,61 +120,67 @@ export class VectorRunner {
         .replace(/\s+/g, '_')
         .slice(0, 56) || 'Vortex_Asset';
 
-    const jobFolder = path.join(config.outputDir, `${baseName}_${jobId.slice(0, 6)}`);
-    if (!fs.existsSync(jobFolder)) {
-      fs.mkdirSync(jobFolder, { recursive: true });
-    }
+    let outPath: string | null = null;
 
-    if (config.preset === 'vtracer') {
-      const outSvgPath = path.join(jobFolder, `${baseName}_Vector.svg`);
-      await this.runSvgVectorizer(jobId, config, outSvgPath, onProgress);
+    try {
+      if (config.preset === 'vtracer') {
+        const outSvgPath = getNonCollidingFilePath(config.outputDir, `${baseName}_Vector`, 'svg');
+        outPath = outSvgPath;
+        await this.runSvgVectorizer(jobId, config, outSvgPath, onProgress);
+        return {
+          outputFilePath: outSvgPath,
+          pills: [
+            {
+              id: 'vec_svg',
+              label: 'Vector_Trace.svg',
+              type: 'svg',
+              filePath: outSvgPath,
+              fileName: path.basename(outSvgPath)
+            }
+          ]
+        };
+      }
+
+      if (config.preset === 'rmbg') {
+        const outMattePath = getNonCollidingFilePath(config.outputDir, `${baseName}_Alpha_Matte`, 'png');
+        outPath = outMattePath;
+        await this.runBackgroundRemover(jobId, config, outMattePath, onProgress);
+        return {
+          outputFilePath: outMattePath,
+          pills: [
+            {
+              id: 'vec_matte',
+              label: 'Alpha_Matte.png',
+              type: 'image',
+              filePath: outMattePath,
+              fileName: path.basename(outMattePath)
+            }
+          ]
+        };
+      }
+
+      // Preset: 'esrgan' (2x / 4x Super-Resolution Asset Upscaler)
+      const scale = config.upscaleFactor || 4;
+      const outUpscaledPath = getNonCollidingFilePath(config.outputDir, `${baseName}_Upscaled_${scale}x`, 'png');
+      outPath = outUpscaledPath;
+      await this.runAssetUpscaler(jobId, config, outUpscaledPath, scale, onProgress);
       return {
-        outputFilePath: outSvgPath,
+        outputFilePath: outUpscaledPath,
         pills: [
           {
-            id: 'vec_svg',
-            label: 'Vector_Trace.svg',
-            type: 'svg',
-            filePath: outSvgPath,
-            fileName: path.basename(outSvgPath)
-          }
-        ]
-      };
-    }
-
-    if (config.preset === 'rmbg') {
-      const outMattePath = path.join(jobFolder, `${baseName}_Alpha_Matte.png`);
-      await this.runBackgroundRemover(jobId, config, outMattePath, onProgress);
-      return {
-        outputFilePath: outMattePath,
-        pills: [
-          {
-            id: 'vec_matte',
-            label: 'Alpha_Matte.png',
+            id: 'vec_upscale',
+            label: `Upscaled_${scale}x.png`,
             type: 'image',
-            filePath: outMattePath,
-            fileName: path.basename(outMattePath)
+            filePath: outUpscaledPath,
+            fileName: path.basename(outUpscaledPath)
           }
         ]
       };
+    } finally {
+      if (outPath) {
+        releaseFilePath(outPath);
+      }
     }
-
-    // Preset: 'esrgan' (2x / 4x Super-Resolution Asset Upscaler)
-    const scale = config.upscaleFactor || 4;
-    const outUpscaledPath = path.join(jobFolder, `${baseName}_Upscaled_${scale}x.png`);
-    await this.runAssetUpscaler(jobId, config, outUpscaledPath, scale, onProgress);
-    return {
-      outputFilePath: outUpscaledPath,
-      pills: [
-        {
-          id: 'vec_upscale',
-          label: `Upscaled_${scale}x.png`,
-          type: 'image',
-          filePath: outUpscaledPath,
-          fileName: path.basename(outUpscaledPath)
-        }
-      ]
-    };
   }
 
   private async runSvgVectorizer(
@@ -545,9 +552,7 @@ out_rgba.save(out_path, 'PNG')
     }
 
     // Check for PyTorch Spandrel + RealESRGAN_x4plus.pth sidecar model in ./bin/models
-    const primaryWeights = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
-    const devWeights = path.join('D:\\CreatorVault\\bin\\models', 'RealESRGAN_x4plus.pth');
-    const weightsPath = fs.existsSync(primaryWeights) ? primaryWeights : devWeights;
+    const weightsPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
     if (fs.existsSync(weightsPath)) {
       try {
         onProgress({
@@ -566,35 +571,65 @@ in_path, out_path, model_path, target_scale = sys.argv[1], sys.argv[2], sys.argv
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = ModelLoader().load_from_file(model_path).to(device).eval()
 
-img = Image.open(in_path).convert('RGB')
-w, h = img.size
-arr = np.array(img).astype(np.float32) / 255.0
+orig_img = Image.open(in_path).convert('RGBA')
+r_img, g_img, b_img, a_img = orig_img.split()
+rgb_img = Image.merge('RGB', (r_img, g_img, b_img))
+
+w, h = rgb_img.size
+arr = np.array(rgb_img).astype(np.float32) / 255.0
 tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to(device)
 
+out_h, out_w = h * 4, w * 4
+
 with torch.no_grad():
-    # Tile if larger than 640px to prevent VRAM spikes
-    if w * h <= 640 * 640:
-        sr = model(tensor)
+    if w * h <= 1024 * 1024:
+        sr = model(tensor).cpu()
     else:
         tile = 384
-        overlap = 16
-        out_h, out_w = h * 4, w * 4
-        sr = torch.zeros((1, 3, out_h, out_w), device=device)
-        for y in range(0, h, tile - overlap):
-            for x in range(0, w, tile - overlap):
+        overlap = 32
+        stride = tile - overlap
+        sr = torch.zeros((1, 3, out_h, out_w), dtype=torch.float32, device='cpu')
+        weight = torch.zeros((1, 1, out_h, out_w), dtype=torch.float32, device='cpu')
+
+        tile_out = tile * 4
+        overlap_out = overlap * 4
+        ramp = torch.linspace(0.01, 1.0, overlap_out)
+        win_x = torch.ones(tile_out)
+        win_x[:overlap_out] = ramp
+        win_x[-overlap_out:] = ramp.flip(0)
+        win_y = torch.ones(tile_out)
+        win_y[:overlap_out] = ramp
+        win_y[-overlap_out:] = ramp.flip(0)
+        base_win = (win_y.unsqueeze(1) * win_x.unsqueeze(0)).unsqueeze(0).unsqueeze(0)
+
+        for y in range(0, h, stride):
+            for x in range(0, w, stride):
                 y1 = min(h, y + tile)
                 x1 = min(w, x + tile)
                 y0 = max(0, y1 - tile)
                 x0 = max(0, x1 - tile)
                 patch = tensor[:, :, y0:y1, x0:x1]
-                sr_patch = model(patch)
-                sr[:, :, y0*4:y1*4, x0*4:x1*4] = sr_patch
+                sr_patch = model(patch).cpu()
 
-sr_np = (sr.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255.0).round().astype(np.uint8)
-res_img = Image.fromarray(sr_np)
+                cur_h = (y1 - y0) * 4
+                cur_w = (x1 - x0) * 4
+                cur_win = base_win[:, :, :cur_h, :cur_w]
+
+                sr[:, :, y0*4:y1*4, x0*4:x1*4] += sr_patch * cur_win
+                weight[:, :, y0*4:y1*4, x0*4:x1*4] += cur_win
+
+        sr = sr / torch.clamp(weight, min=1e-5)
+
+sr_np = (sr.squeeze(0).permute(1, 2, 0).clamp(0, 1).numpy() * 255.0).round().astype(np.uint8)
+res_img = Image.fromarray(sr_np, mode='RGB')
+
+# Upscale alpha mask cleanly
+upscaled_alpha = a_img.resize((out_w, out_h), Image.Resampling.LANCZOS)
+final_rgba = Image.merge('RGBA', (*res_img.split(), upscaled_alpha))
+
 if target_scale == 2:
-    res_img = res_img.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
-res_img.save(out_path, 'PNG')
+    final_rgba = final_rgba.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+final_rgba.save(out_path, 'PNG')
 `;
         await this.spawnTracked(jobId, this.getPythonPath(), [
           '-c',
@@ -608,7 +643,7 @@ res_img.save(out_path, 'PNG')
           return;
         }
       } catch {
-        // Fallback to FFmpeg Lanczos+CAS below if PyTorch/Spandrel fails
+        // Fallback to FFmpeg Lanczos+unsharp below if PyTorch/Spandrel fails
       }
     }
 
@@ -616,7 +651,7 @@ res_img.save(out_path, 'PNG')
       jobId,
       stage: 'remuxing',
       progress: 45,
-      statusMessage: `Upscaling ${scale}x via FFmpeg Lanczos + CAS edge restoration...`
+      statusMessage: `Upscaling ${scale}x via FFmpeg Lanczos + edge sharpening...`
     });
 
     await this.spawnTracked(jobId, this.getFfmpegPath(), [
@@ -624,7 +659,7 @@ res_img.save(out_path, 'PNG')
       '-i',
       config.inputPath,
       '-vf',
-      `scale=iw*${scale}:ih*${scale}:flags=lanczos+accurate_rnd+full_chroma_int,cas=strength=0.65,unsharp=5:5:0.8:5:5:0.0`,
+      `scale=iw*${scale}:ih*${scale}:flags=lanczos+accurate_rnd+full_chroma_int,unsharp=5:5:0.8:5:5:0.0`,
       '-frames:v',
       '1',
       outUpscaledPath

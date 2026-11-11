@@ -1,6 +1,6 @@
 {
   "name": "vortex-media-engine",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local-First Creator Media Engine — Universal Clipper, Ripper & AI Stem Lab",
   "author": "Pranshu (pranzzzhu)",
   "license": "MIT",
@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --test tests/*.test.mjs",
     "dist:win": "tsc && vite build && electron-builder --win --x64",
     "preview": "vite preview"
   },

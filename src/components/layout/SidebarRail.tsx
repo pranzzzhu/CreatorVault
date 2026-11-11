@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  ArrowLeftRight,
   Cpu,
   Download,
   Film,
@@ -23,21 +24,27 @@ interface NavEntry {
 const NAV_ITEMS: NavEntry[] = [
   {
     id: 'ripper',
-    label: 'Ripper & Stem Lab',
-    subtitle: 'Clip, rip & split stems',
+    label: 'Download & Clip',
+    subtitle: 'Save videos, clips & stems',
     icon: Download
   },
   {
     id: 'fixer',
-    label: 'Video Fixer Deck',
-    subtitle: 'Deflicker & NLE proxies',
+    label: 'Video Quick Fixes',
+    subtitle: 'Reels prep, size & cut pauses',
     icon: Film
   },
   {
     id: 'vectorizer',
-    label: 'Vector & Upscale',
-    subtitle: 'SVG trace & alpha matte',
+    label: 'Image Tools',
+    subtitle: 'Remove BG, upscale & SVG',
     icon: PenTool
+  },
+  {
+    id: 'converter',
+    label: 'Format Converter',
+    subtitle: 'Convert any video or audio',
+    icon: ArrowLeftRight
   }
 ];
 
@@ -72,7 +79,7 @@ export const SidebarRail: React.FC = () => {
               Vortex
             </span>
           </div>
-          <span className="badge badge-xs badge-ghost num">v0.1</span>
+          <span className="badge badge-xs badge-ghost num">v0.2</span>
         </div>
 
         {/* Workspace Navigation Menu */}
@@ -130,7 +137,7 @@ export const SidebarRail: React.FC = () => {
             </span>
           </div>
           <div className="text-[11px] text-base-content/50 flex items-center justify-between">
-            <span>Sidecar binaries</span>
+            <span>Built-in tools</span>
             {diagnostics === null ? (
               <span className="text-base-content/60 font-medium">Scanning...</span>
             ) : (

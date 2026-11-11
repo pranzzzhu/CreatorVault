@@ -301,33 +301,32 @@ export class BinaryManager {
     }
 
     const modelPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
-    const fallbackDevModel = path.join('D:\\CreatorVault\\bin\\models', 'RealESRGAN_x4plus.pth');
-    const resolvedModelPath = fs.existsSync(modelPath)
-      ? modelPath
-      : fs.existsSync(fallbackDevModel)
-        ? fallbackDevModel
-        : modelPath;
-    const hasWeights = fs.existsSync(resolvedModelPath);
+    const hasWeights = fs.existsSync(modelPath);
 
     for (const candidate of this.getPythonCandidates()) {
       if (this.hasPythonModule(candidate.cmd, 'spandrel') && hasWeights) {
         return {
           name: 'realesrgan',
           available: true,
-          resolvedPath: resolvedModelPath,
+          resolvedPath: modelPath,
           source: 'local-bin',
           version: 'Real-ESRGAN x4plus (CUDA/PyTorch)',
-          installHint: 'pip install -U spandrel torchvision'
+          installHint: 'Installed (spandrel + RealESRGAN_x4plus.pth)'
         };
       }
     }
+
+    const hasSpandrel = this.getPythonCandidates().some(c => this.hasPythonModule(c.cmd, 'spandrel'));
+    const installHint = !hasWeights && hasSpandrel
+      ? 'Click 1-Click Install to download RealESRGAN_x4plus.pth weights into ./bin/models'
+      : 'Click 1-Click Install or run: pip install -U spandrel torchvision';
 
     return {
       name: 'realesrgan',
       available: false,
       resolvedPath: 'python',
       source: 'missing',
-      installHint: 'pip install -U spandrel torchvision'
+      installHint
     };
   }
 
@@ -362,7 +361,7 @@ export class BinaryManager {
       'yt-dlp': {
         name: 'yt-dlp',
         ...ytdlp,
-        installHint: 'pip install -U yt-dlp'
+        installHint: 'Click 1-Click Install or place yt-dlp in ./bin'
       },
       ffmpeg: {
         name: 'ffmpeg',
@@ -437,7 +436,59 @@ export class BinaryManager {
       } else if (name === 'demucs') {
         await runCmd(pythonCmd, ['-m', 'pip', 'install', '-U', 'demucs']);
       } else if (name === 'yt-dlp') {
-        await runCmd(pythonCmd, ['-m', 'pip', 'install', '-U', 'yt-dlp']);
+        const exeName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+        const targetPath = path.join(this.binDir, exeName);
+        const tempPath = path.join(this.binDir, `${exeName}.tmp_${Date.now()}`);
+        const url = process.platform === 'win32'
+          ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+          : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 60000);
+
+        try {
+          const res = await fetch(url, { signal: controller.signal });
+          clearTimeout(timer);
+          if (!res.ok) throw new Error(`Failed to download yt-dlp binary (${res.status} ${res.statusText})`);
+          if (!res.body) throw new Error('Download stream is empty.');
+
+          const fileStream = fs.createWriteStream(tempPath);
+          const { Readable } = await import('node:stream');
+          const { pipeline } = await import('node:stream/promises');
+          await pipeline(Readable.fromWeb(res.body as any), fileStream);
+
+          const stat = fs.statSync(tempPath);
+          if (stat.size < 1024 * 1024) {
+            try { fs.unlinkSync(tempPath); } catch {}
+            throw new Error(`Downloaded yt-dlp binary is incomplete (${Math.round(stat.size / 1024)} KB)`);
+          }
+
+          if (process.platform !== 'win32') {
+            fs.chmodSync(tempPath, '755');
+            if (process.platform === 'darwin') {
+              try {
+                execFileSync('xattr', ['-d', 'com.apple.quarantine', tempPath], { stdio: 'ignore' });
+              } catch {}
+            }
+          }
+
+          if (fs.existsSync(targetPath)) {
+            try {
+              fs.unlinkSync(targetPath);
+            } catch (unlinkErr) {
+              const code = (unlinkErr as any)?.code;
+              if (code === 'EBUSY' || code === 'EPERM') {
+                throw new Error('yt-dlp binary is currently locked by another process or antivirus. Close active downloads and try again.');
+              }
+            }
+          }
+          fs.renameSync(tempPath, targetPath);
+        } catch (downloadErr) {
+          if (fs.existsSync(tempPath)) {
+            try { fs.unlinkSync(tempPath); } catch {}
+          }
+          throw downloadErr;
+        }
       } else if (name === 'ffmpeg' || name === 'ffprobe') {
         if (process.platform === 'win32') {
           await runCmd('winget', [

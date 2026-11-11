@@ -2,12 +2,15 @@ import { create } from 'zustand';
 import type {
   BinaryName,
   BrowserSource,
+  ConverterJobConfig,
+  ConverterTargetFormat,
   FixerJobConfig,
   FixerPresetId,
   JobConfig,
   JobItem,
   JobProgressEvent,
   LocalImageMetadata,
+  LocalMediaMetadata,
   LocalVideoMetadata,
   MediaMetadata,
   ModuleId,
@@ -54,6 +57,7 @@ interface JobStoreState {
   deflickerWindow: number;
   useHardwareEncoder: boolean;
   fixerError: string | null;
+  isFixingBatch: boolean;
 
   // Reel Optimizer Options
   reelPlatform: 'ig-reels' | 'tiktok' | 'yt-shorts';
@@ -71,6 +75,7 @@ interface JobStoreState {
   matteTolerance: number;
   upscaleFactor: 2 | 4;
   vectorError: string | null;
+  isVectorBatch: boolean;
   lastVectorPreview: {
     sourcePath: string;
     outputPath: string;
@@ -131,6 +136,28 @@ interface JobStoreState {
   clearStagedLocalImages: () => void;
   enqueueAndRunVectorJobs: () => Promise<void>;
 
+  // Phase 4: Universal Converter State
+  stagedConverterMedia: LocalMediaMetadata[];
+  converterTargetFormat: ConverterTargetFormat;
+  converterSmartCopy: boolean;
+  converterSampleRate: 48000 | 44100;
+  converterNormalizeLoudness: boolean;
+  converterAudioToVideoMode: 'waveform' | 'slate';
+  converterError: string | null;
+  isConvertingBatch: boolean;
+
+  // Phase 4 Actions
+  setConverterTargetFormat: (fmt: ConverterTargetFormat) => void;
+  setConverterSmartCopy: (enabled: boolean) => void;
+  setConverterSampleRate: (sr: 48000 | 44100) => void;
+  setConverterNormalizeLoudness: (enabled: boolean) => void;
+  setConverterAudioToVideoMode: (mode: 'waveform' | 'slate') => void;
+  browseAndStageConverterMedia: () => Promise<void>;
+  stageConverterMediaPaths: (paths: string[]) => Promise<void>;
+  removeStagedConverterMedia: (filePath: string) => void;
+  clearStagedConverterMedia: () => void;
+  enqueueAndRunConverterJobs: () => Promise<void>;
+
   initDiagnostics: () => Promise<void>;
   refreshDiagnostics: () => Promise<void>;
   installSidecarBinary: (name: BinaryName) => Promise<{ success: boolean; message: string }>;
@@ -149,7 +176,7 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   editReadyMode: true,
   browserCookies: 'none',
   simulateIfMissingBinary: true,
-  outputDir: '',
+  outputDir: localStorage.getItem('vortex_last_output_dir') || '',
 
   diagnostics: null,
   isSettingsModalOpen: false,
@@ -174,6 +201,7 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   deflickerWindow: 7,
   useHardwareEncoder: true,
   fixerError: null,
+  isFixingBatch: false,
 
   reelPlatform: 'ig-reels',
   reelTargetFps: 'keep',
@@ -189,13 +217,26 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   matteTolerance: 24,
   upscaleFactor: 4,
   vectorError: null,
+  isVectorBatch: false,
   lastVectorPreview: null,
+
+  stagedConverterMedia: [],
+  converterTargetFormat: 'mp4',
+  converterSmartCopy: true,
+  converterSampleRate: 48000,
+  converterNormalizeLoudness: false,
+  converterAudioToVideoMode: 'waveform',
+  converterError: null,
+  isConvertingBatch: false,
 
   jobs: [],
 
   setActiveModule: (activeModule) => set({ activeModule }),
   setThemeMode: (themeMode) => {
     document.documentElement.setAttribute('data-theme', themeMode);
+    if (window.vortexApi?.setTheme) {
+      window.vortexApi.setTheme(themeMode).catch(() => {});
+    }
     set({ themeMode });
   },
   setZoomFactor: async (factor: number) => {
@@ -219,7 +260,12 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   setEditReadyMode: (editReadyMode) => set({ editReadyMode }),
   setBrowserCookies: (browserCookies) => set({ browserCookies }),
   setSimulateIfMissingBinary: (simulateIfMissingBinary) => set({ simulateIfMissingBinary }),
-  setOutputDir: (outputDir) => set({ outputDir }),
+  setOutputDir: (outputDir) => {
+    if (outputDir) {
+      localStorage.setItem('vortex_last_output_dir', outputDir);
+    }
+    set({ outputDir });
+  },
   setSettingsModalOpen: (isSettingsModalOpen) => set({ isSettingsModalOpen }),
 
   setUrlInput: (urlInput) => set({ urlInput, probeError: null }),
@@ -228,8 +274,9 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   setTimeRange: (start, end) => {
     const media = get().stagedMedia;
     const maxDur = media ? media.duration : 3600;
-    const clampedStart = Math.max(0, Math.min(start, maxDur - 1));
-    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, maxDur));
+    const minStep = Math.min(0.1, maxDur);
+    const clampedStart = Math.max(0, Math.min(start, Math.max(0, maxDur - minStep)));
+    const clampedEnd = Math.max(clampedStart + minStep, Math.min(end, maxDur));
     set({ startTime: Number(clampedStart.toFixed(2)), endTime: Number(clampedEnd.toFixed(2)) });
   },
   setStemMode: (stemMode) => set({ stemMode }),
@@ -298,7 +345,13 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
 
   enqueueAndRunFixerJobs: async () => {
     const state = get();
-    if (state.stagedLocalVideos.length === 0 || !window.vortexApi?.startFixerJob) return;
+    if (
+      state.isFixingBatch ||
+      state.stagedLocalVideos.length === 0 ||
+      !window.vortexApi?.startFixerJob
+    ) {
+      return;
+    }
 
     const presetBadgeMap: Record<FixerPresetId, QualityPreset> = {
       deflicker: '1080p',
@@ -310,100 +363,110 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
 
     const videosToProcess = [...state.stagedLocalVideos];
     // Clear staged videos immediately so re-clicks cannot submit duplicates (MJ-1)
-    set({ stagedLocalVideos: [], fixerError: null });
+    set({ isFixingBatch: true, stagedLocalVideos: [], fixerError: null });
 
-    // Execute sequentially to respect consumer GPU NVENC session limits (CB-1)
-    for (const video of videosToProcess) {
-      const jobId = `fix_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      const fixerConfig: FixerJobConfig = {
-        inputPath: video.filePath,
-        fileName: video.fileName,
-        duration: video.duration,
-        width: video.width,
-        height: video.height,
-        fps: video.fps,
-        preset: state.selectedFixerPreset,
-        targetSizeMB: state.targetSizeMB,
-        silenceThresholdDb: state.silenceThresholdDb,
-        silenceMinDuration: state.silenceMinDuration,
-        deflickerWindow: state.deflickerWindow,
-        useHardwareEncoder: state.useHardwareEncoder,
-        outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || './exports',
-        reelOptimizer: {
-          platform: state.reelPlatform,
-          targetFps: state.reelTargetFps,
-          preSharpen: state.reelPreSharpen,
-          denoiseGrain: state.reelDenoiseGrain,
-          colorFixRec709: state.reelColorFixRec709,
-          simulateIgCompression: state.reelSimulateIgCompression
-        }
-      };
-
-      const newJob: JobItem = {
-        id: jobId,
-        createdAt: Date.now(),
-        config: {
-          url: video.filePath,
-          title: `[${state.selectedFixerPreset.toUpperCase()}] ${video.fileName}`,
-          thumbnail: '',
-          platform: 'Direct',
+    try {
+      // Execute sequentially to respect consumer GPU NVENC session limits (CB-1)
+      for (const video of videosToProcess) {
+        const jobId = `fix_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const fixerConfig: FixerJobConfig = {
+          inputPath: video.filePath,
+          fileName: video.fileName,
           duration: video.duration,
-          quality: presetBadgeMap[state.selectedFixerPreset],
-          editReadyMode: true,
-          trimEnabled: false,
-          startTime: 0,
-          endTime: video.duration,
-          stemMode: 'off',
-          browserCookies: 'none',
-          outputDir: fixerConfig.outputDir,
-          simulateIfMissingBinary: false
-        },
-        stage: 'remuxing',
-        progress: 2,
-        speed: '—',
-        eta: '—',
-        statusMessage: `Starting FFmpeg ${state.selectedFixerPreset} pipeline...`,
-        pills: []
-      };
+          width: video.width,
+          height: video.height,
+          fps: video.fps,
+          videoCodec: video.videoCodec,
+          audioCodec: video.audioCodec,
+          preset: state.selectedFixerPreset,
+          targetSizeMB: state.targetSizeMB,
+          silenceThresholdDb: state.silenceThresholdDb,
+          silenceMinDuration: state.silenceMinDuration,
+          deflickerWindow: state.deflickerWindow,
+          useHardwareEncoder: state.useHardwareEncoder,
+          outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || '',
+          reelOptimizer: {
+            platform: state.reelPlatform,
+            targetFps: state.reelTargetFps,
+            preSharpen: state.reelPreSharpen,
+            denoiseGrain: state.reelDenoiseGrain,
+            colorFixRec709: state.reelColorFixRec709,
+            simulateIgCompression: state.reelSimulateIgCompression
+          }
+        };
 
-      set((prev) => ({
-        jobs: [newJob, ...prev.jobs]
-      }));
+        const newJob: JobItem = {
+          id: jobId,
+          createdAt: Date.now(),
+          config: {
+            url: video.filePath,
+            title: `[${state.selectedFixerPreset.toUpperCase()}] ${video.fileName}`,
+            thumbnail: '',
+            platform: 'Direct',
+            duration: video.duration,
+            quality: presetBadgeMap[state.selectedFixerPreset],
+            editReadyMode: true,
+            trimEnabled: false,
+            startTime: 0,
+            endTime: video.duration,
+            stemMode: 'off',
+            browserCookies: 'none',
+            outputDir: fixerConfig.outputDir,
+            simulateIfMissingBinary: false
+          },
+          stage: 'remuxing',
+          progress: 2,
+          speed: '—',
+          eta: '—',
+          statusMessage: `Starting FFmpeg ${state.selectedFixerPreset} pipeline...`,
+          pills: []
+        };
 
-      try {
-        const result = await window.vortexApi.startFixerJob(jobId, fixerConfig);
         set((prev) => ({
-          jobs: prev.jobs.map((j) =>
-            j.id === jobId
-              ? {
-                  ...j,
-                  stage: 'completed',
-                  progress: 100,
-                  statusMessage: 'Ready — Drag processed media to timeline',
-                  outputFilePath: result.outputFilePath,
-                  pills: result.pills,
-                  vmafComparison: result.vmafComparison,
-                  usedSimulation: false
-                }
-              : j
-          )
+          jobs: [newJob, ...prev.jobs]
         }));
-      } catch (err) {
-        const msg = (err as Error).message || 'FFmpeg fixer job failed';
-        const isCancelled = msg.toLowerCase().includes('cancelled by user');
-        set((prev) => ({
-          jobs: prev.jobs.map((j) =>
-            j.id === jobId
-              ? {
-                  ...j,
-                  stage: 'error',
-                  statusMessage: isCancelled ? 'Cancelled by user' : msg,
-                  error: msg
-                }
-              : j
-          )
-        }));
+
+        try {
+          const result = await window.vortexApi.startFixerJob(jobId, fixerConfig);
+          set((prev) => ({
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'completed',
+                    progress: 100,
+                    statusMessage: 'Ready — Drag processed media to timeline',
+                    outputFilePath: result.outputFilePath,
+                    pills: result.pills,
+                    vmafComparison: result.vmafComparison,
+                    usedSimulation: false
+                  }
+                : j
+            )
+          }));
+        } catch (err) {
+          const msg = (err as Error).message || 'FFmpeg fixer job failed';
+          const isCancelled = msg.toLowerCase().includes('cancelled by user');
+          set((prev) => ({
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'error',
+                    statusMessage: isCancelled ? 'Cancelled by user' : msg,
+                    error: msg
+                  }
+                : j
+            )
+          }));
+
+          if (isCancelled) {
+            break;
+          }
+        }
       }
+    } finally {
+      set({ isFixingBatch: false });
     }
   },
 
@@ -459,115 +522,304 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
 
   enqueueAndRunVectorJobs: async () => {
     const state = get();
-    if (state.stagedLocalImages.length === 0 || !window.vortexApi?.startVectorJob) return;
+    if (
+      state.isVectorBatch ||
+      state.stagedLocalImages.length === 0 ||
+      !window.vortexApi?.startVectorJob
+    ) {
+      return;
+    }
 
     const imagesToProcess = [...state.stagedLocalImages];
     // Clear staged images immediately so re-clicks cannot submit duplicates (MJ-1)
-    set({ stagedLocalImages: [], vectorError: null });
+    set({ isVectorBatch: true, stagedLocalImages: [], vectorError: null });
 
-    // Execute sequentially to prevent PyTorch/ONNX VRAM spikes (CB-1)
-    for (const img of imagesToProcess) {
-      const jobId = `vec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-      const vecConfig: VectorJobConfig = {
-        inputPath: img.filePath,
-        fileName: img.fileName,
-        width: img.width,
-        height: img.height,
-        preset: state.selectedVectorPreset,
-        colorMode: state.vectorColorMode,
-        detailLevel: state.vectorDetailLevel,
-        matteTolerance: state.matteTolerance,
-        upscaleFactor: state.upscaleFactor,
-        outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || './exports'
-      };
+    try {
+      // Execute sequentially to prevent PyTorch/ONNX VRAM spikes (CB-1)
+      for (const img of imagesToProcess) {
+        const jobId = `vec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const vecConfig: VectorJobConfig = {
+          inputPath: img.filePath,
+          fileName: img.fileName,
+          width: img.width,
+          height: img.height,
+          preset: state.selectedVectorPreset,
+          colorMode: state.vectorColorMode,
+          detailLevel: state.vectorDetailLevel,
+          matteTolerance: state.matteTolerance,
+          upscaleFactor: state.upscaleFactor,
+          outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || ''
+        };
 
-      const newJob: JobItem = {
-        id: jobId,
-        createdAt: Date.now(),
-        config: {
-          url: img.filePath,
-          title: `[${state.selectedVectorPreset.toUpperCase()}] ${img.fileName}`,
-          thumbnail: `vortex-media://local/${encodeURIComponent(img.filePath)}`,
-          platform: 'Direct',
-          duration: 0,
-          quality: state.selectedVectorPreset === 'esrgan' && state.upscaleFactor === 4 ? '4K' : '1080p',
-          editReadyMode: true,
-          trimEnabled: false,
-          startTime: 0,
-          endTime: 0,
-          stemMode: 'off',
-          browserCookies: 'none',
-          outputDir: vecConfig.outputDir,
-          simulateIfMissingBinary: false
-        },
-        stage: 'remuxing',
-        progress: 5,
-        speed: '—',
-        eta: '—',
-        statusMessage: `Running ${state.selectedVectorPreset} asset pipeline...`,
-        pills: []
-      };
-
-      set((prev) => ({
-        jobs: [newJob, ...prev.jobs]
-      }));
-
-      try {
-        const result = await window.vortexApi.startVectorJob(jobId, vecConfig);
-        set((prev) => ({
-          lastVectorPreview: {
-            sourcePath: img.filePath,
-            outputPath: result.outputFilePath,
-            preset: state.selectedVectorPreset
+        const newJob: JobItem = {
+          id: jobId,
+          createdAt: Date.now(),
+          config: {
+            url: img.filePath,
+            title: `[${state.selectedVectorPreset.toUpperCase()}] ${img.fileName}`,
+            thumbnail: `vortex-media://local/${encodeURIComponent(img.filePath)}`,
+            platform: 'Direct',
+            duration: 0,
+            quality: state.selectedVectorPreset === 'esrgan' && state.upscaleFactor === 4 ? '4K' : '1080p',
+            editReadyMode: true,
+            trimEnabled: false,
+            startTime: 0,
+            endTime: 0,
+            stemMode: 'off',
+            browserCookies: 'none',
+            outputDir: vecConfig.outputDir,
+            simulateIfMissingBinary: false
           },
-          jobs: prev.jobs.map((j) =>
-            j.id === jobId
-              ? {
-                  ...j,
-                  stage: 'completed',
-                  progress: 100,
-                  statusMessage: 'Ready — Drag vector or image asset to canvas',
-                  outputFilePath: result.outputFilePath,
-                  pills: result.pills,
-                  usedSimulation: false
-                }
-              : j
-          )
-        }));
-      } catch (err) {
-        const msg = (err as Error).message || 'Asset pipeline failed';
-        const isCancelled = msg.toLowerCase().includes('cancelled by user');
+          stage: 'remuxing',
+          progress: 5,
+          speed: '—',
+          eta: '—',
+          statusMessage: `Running ${state.selectedVectorPreset} asset pipeline...`,
+          pills: []
+        };
+
         set((prev) => ({
-          jobs: prev.jobs.map((j) =>
-            j.id === jobId
-              ? {
-                  ...j,
-                  stage: 'error',
-                  statusMessage: isCancelled ? 'Cancelled by user' : msg,
-                  error: msg
-                }
-              : j
-          )
+          jobs: [newJob, ...prev.jobs]
         }));
+
+        try {
+          const result = await window.vortexApi.startVectorJob(jobId, vecConfig);
+          set((prev) => ({
+            lastVectorPreview: {
+              sourcePath: img.filePath,
+              outputPath: result.outputFilePath,
+              preset: state.selectedVectorPreset
+            },
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'completed',
+                    progress: 100,
+                    statusMessage: 'Ready — Drag vector or image asset to canvas',
+                    outputFilePath: result.outputFilePath,
+                    pills: result.pills,
+                    usedSimulation: false
+                  }
+                : j
+            )
+          }));
+        } catch (err) {
+          const msg = (err as Error).message || 'Asset pipeline failed';
+          const isCancelled = msg.toLowerCase().includes('cancelled by user');
+          set((prev) => ({
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'error',
+                    statusMessage: isCancelled ? 'Cancelled by user' : msg,
+                    error: msg
+                  }
+                : j
+            )
+          }));
+
+          if (isCancelled) {
+            break;
+          }
+        }
       }
+    } finally {
+      set({ isVectorBatch: false });
+    }
+  },
+
+  setConverterTargetFormat: (converterTargetFormat) => {
+    const isAudio = ['wav', 'mp3', 'flac', 'm4a', 'ogg'].includes(converterTargetFormat);
+    set((prev) => ({
+      converterTargetFormat,
+      converterError: null,
+      converterNormalizeLoudness: isAudio ? prev.converterNormalizeLoudness : false
+    }));
+  },
+  setConverterSmartCopy: (converterSmartCopy) => set({ converterSmartCopy }),
+  setConverterSampleRate: (converterSampleRate) => set({ converterSampleRate }),
+  setConverterNormalizeLoudness: (converterNormalizeLoudness) =>
+    set({ converterNormalizeLoudness }),
+  setConverterAudioToVideoMode: (converterAudioToVideoMode) =>
+    set({ converterAudioToVideoMode }),
+
+  browseAndStageConverterMedia: async () => {
+    if (!window.vortexApi?.selectMediaFiles) return;
+    const paths = await window.vortexApi.selectMediaFiles();
+    if (paths && paths.length > 0) {
+      await get().stageConverterMediaPaths(paths);
+    }
+  },
+
+  stageConverterMediaPaths: async (paths: string[]) => {
+    if (!window.vortexApi?.probeLocalMedia || paths.length === 0) return;
+    set({ converterError: null, isProbing: true });
+
+    const existingPaths = new Set(get().stagedConverterMedia.map((m) => m.filePath));
+    const newlyProbed: LocalMediaMetadata[] = [];
+
+    for (const p of paths) {
+      if (!p || existingPaths.has(p)) continue;
+      try {
+        const meta = await window.vortexApi.probeLocalMedia(p);
+        newlyProbed.push(meta);
+        existingPaths.add(p);
+      } catch (err) {
+        set({ converterError: (err as Error).message || `Failed to inspect ${p}` });
+      }
+    }
+
+    set((prev) => ({
+      isProbing: false,
+      stagedConverterMedia:
+        newlyProbed.length > 0
+          ? [...prev.stagedConverterMedia, ...newlyProbed]
+          : prev.stagedConverterMedia
+    }));
+  },
+
+  removeStagedConverterMedia: (filePath: string) =>
+    set((prev) => ({
+      stagedConverterMedia: prev.stagedConverterMedia.filter((m) => m.filePath !== filePath)
+    })),
+
+  clearStagedConverterMedia: () =>
+    set({ stagedConverterMedia: [], converterError: null }),
+
+  enqueueAndRunConverterJobs: async () => {
+    const state = get();
+    if (
+      state.isConvertingBatch ||
+      state.stagedConverterMedia.length === 0 ||
+      !window.vortexApi?.startConverterJob
+    ) {
+      return;
+    }
+
+    const itemsToConvert = [...state.stagedConverterMedia];
+    set({ isConvertingBatch: true, stagedConverterMedia: [], converterError: null });
+
+    const isAudioTarget = ['wav', 'mp3', 'flac', 'm4a', 'ogg'].includes(
+      state.converterTargetFormat
+    );
+
+    try {
+      for (const item of itemsToConvert) {
+        const jobId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const convConfig: ConverterJobConfig = {
+          inputPath: item.filePath,
+          fileName: item.fileName,
+          duration: item.duration,
+          mediaType: item.mediaType,
+          width: item.width,
+          height: item.height,
+          fps: item.fps,
+          videoCodec: item.videoCodec,
+          audioCodec: item.audioCodec,
+          targetFormat: state.converterTargetFormat,
+          smartCopy: state.converterSmartCopy,
+          audioSampleRate: state.converterSampleRate,
+          normalizeLoudness: state.converterNormalizeLoudness,
+          audioToVideoMode: state.converterAudioToVideoMode,
+          useHardwareEncoder: state.useHardwareEncoder,
+          outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || ''
+        };
+
+        const newJob: JobItem = {
+          id: jobId,
+          createdAt: Date.now(),
+          config: {
+            url: item.filePath,
+            title: `[→ .${state.converterTargetFormat.toUpperCase()}] ${item.fileName}`,
+            thumbnail: '',
+            platform: 'Direct',
+            duration: item.duration,
+            quality: isAudioTarget ? 'audio-wav' : '1080p',
+            editReadyMode: true,
+            trimEnabled: false,
+            startTime: 0,
+            endTime: item.duration,
+            stemMode: 'off',
+            browserCookies: 'none',
+            outputDir: convConfig.outputDir,
+            simulateIfMissingBinary: false
+          },
+          stage: 'remuxing',
+          progress: 2,
+          speed: '—',
+          eta: '—',
+          statusMessage: `Converting to .${state.converterTargetFormat.toUpperCase()}...`,
+          pills: []
+        };
+
+        set((prev) => ({
+          jobs: [newJob, ...prev.jobs]
+        }));
+
+        try {
+          const result = await window.vortexApi.startConverterJob(jobId, convConfig);
+          set((prev) => ({
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'completed',
+                    progress: 100,
+                    statusMessage: result.usedSmartCopy
+                      ? 'Ready — Instant Zero-Loss Remux Complete'
+                      : 'Ready — Drag converted media to timeline',
+                    outputFilePath: result.outputFilePath,
+                    pills: result.pills,
+                    usedSimulation: false
+                  }
+                : j
+            )
+          }));
+        } catch (err) {
+          const msg = (err as Error).message || 'Format conversion failed';
+          const isCancelled = msg.toLowerCase().includes('cancelled by user');
+          set((prev) => ({
+            jobs: prev.jobs.map((j) =>
+              j.id === jobId
+                ? {
+                    ...j,
+                    stage: 'error',
+                    statusMessage: isCancelled ? 'Cancelled by user' : msg,
+                    error: msg
+                  }
+                : j
+            )
+          }));
+
+          if (isCancelled) {
+            break; // Stop subsequent jobs in batch on cancellation
+          }
+        }
+      }
+    } finally {
+      set({ isConvertingBatch: false });
     }
   },
 
   initDiagnostics: async () => {
     if (!window.vortexApi) return;
     const diag = await window.vortexApi.getDiagnostics();
+    const savedDir = localStorage.getItem('vortex_last_output_dir');
     set({
       diagnostics: diag,
-      outputDir: get().outputDir || diag.defaultOutputDir
+      outputDir: savedDir || get().outputDir || diag.defaultOutputDir
     });
   },
 
   refreshDiagnostics: async () => {
     if (!window.vortexApi) return;
     const diag = await window.vortexApi.refreshDiagnostics();
+    const savedDir = localStorage.getItem('vortex_last_output_dir');
     set({
       diagnostics: diag,
-      outputDir: get().outputDir || diag.defaultOutputDir
+      outputDir: savedDir || get().outputDir || diag.defaultOutputDir
     });
   },
 
@@ -595,8 +847,13 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
 
   chooseOutputDirectory: async () => {
     if (!window.vortexApi) return;
-    const picked = await window.vortexApi.selectOutputDirectory();
+    const currentDir =
+      get().outputDir ||
+      localStorage.getItem('vortex_last_output_dir') ||
+      get().diagnostics?.defaultOutputDir;
+    const picked = await window.vortexApi.selectOutputDirectory(currentDir);
     if (picked) {
+      localStorage.setItem('vortex_last_output_dir', picked);
       set({ outputDir: picked });
     }
   },
@@ -652,7 +909,7 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
       endTime: state.endTime,
       stemMode: state.stemMode,
       browserCookies: state.browserCookies,
-      outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || './exports',
+      outputDir: state.outputDir || state.diagnostics?.defaultOutputDir || '',
       simulateIfMissingBinary: state.simulateIfMissingBinary
     };
 
@@ -669,6 +926,8 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
     };
 
     set((prev) => ({
+      stagedMedia: null,
+      urlInput: '',
       jobs: [newJob, ...prev.jobs]
     }));
 

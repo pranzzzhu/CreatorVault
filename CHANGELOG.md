@@ -5,6 +5,35 @@ All notable changes to **VORTEX (CreatorVault)** will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-11
+
+### Added
+- **Module 4: Universal Format Converter (`converter`)**:
+  - Full 4-way media format conversion matrix: Video-to-Video, Video-to-Audio, Audio-to-Audio, and Audio-to-Video.
+  - Video output targets: MP4, MOV, MKV, WEBM, and animated high-fidelity 256-color palette GIF.
+  - Audio output targets: WAV (48kHz/96kHz 16-bit studio master), MP3 (320k), FLAC (lossless), M4A (320k), and OGG (q8).
+  - Smart Copy: Instant zero-loss container remuxing (`-c copy`) for compatible video/audio streams.
+  - Audio-to-Video rendering with real-time dynamic waveform visualization (`showwaves`) or studio dark slate backdrop.
+  - Optional EBU R128 (-14 LUFS) broadcast loudness normalization.
+- **Direct Export Mode (Single-File Streamlining)**:
+  - Jobs producing a single file (such as standalone video clips, single format conversions, or deflickered videos) export directly into the selected output directory without creating an extra subfolder.
+  - Multi-file jobs (Demucs stem separation, Premiere XML cuts + jump-cut preview, IG Reel armored + compression preview) retain isolated subfolders.
+- **Collision-Proof File Resolution (`FileUtils.ts`)**:
+  - In-memory `activeReservedPaths` reservation set with `releaseFilePath()` to eliminate TOCTOU race conditions across parallel jobs.
+  - Automated counter incrementing (`(1)`, `(2)`, `(3)`) preventing suffix stacking (`Clip (1) (1).mp4`).
+  - Windows DOS reserved device name shielding (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) and trailing dot/whitespace stripping.
+- **Plain-English UX & Language Redesign**:
+  - Simplified all interface copy, tool descriptions, badges, and action buttons to accessible everyday English.
+- **Node.js Self-Check Test Suite (`tests/self-check.test.mjs`)**:
+  - 8 automated tests covering timestamp boundary rollovers, media protocol whitelisting, bitrate budgets, taskbar ratios, sub-second slider windows, collision resolution, silence chopper audio validation, and Premiere Pro XML timeline frame alignment.
+
+### Changed
+- Bumped application version to `0.2.0`.
+- Updated Sidebar navigation to include Universal Converter.
+- Upgraded release packaging configuration and asset creation.
+
+---
+
 ## [0.1.1] - 2026-11-08
 
 ### Added

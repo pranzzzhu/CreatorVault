@@ -1,4 +1,49 @@
-export type ModuleId = 'ripper' | 'fixer' | 'vectorizer';
+export type ModuleId = 'ripper' | 'fixer' | 'vectorizer' | 'converter';
+
+export type ConverterTargetFormat =
+  | 'mp4'
+  | 'mov'
+  | 'mkv'
+  | 'webm'
+  | 'gif'
+  | 'wav'
+  | 'mp3'
+  | 'flac'
+  | 'm4a'
+  | 'ogg';
+
+export interface LocalMediaMetadata {
+  filePath: string;
+  fileName: string;
+  fileSizeMB: number;
+  duration: number;
+  mediaType: 'video' | 'audio';
+  width: number;
+  height: number;
+  fps: number;
+  videoCodec: string;
+  audioCodec: string;
+  sampleRate: number;
+}
+
+export interface ConverterJobConfig {
+  inputPath: string;
+  fileName: string;
+  duration: number;
+  mediaType: 'video' | 'audio';
+  width: number;
+  height: number;
+  fps: number;
+  videoCodec: string;
+  audioCodec: string;
+  targetFormat: ConverterTargetFormat;
+  smartCopy: boolean;
+  audioSampleRate: 48000 | 44100;
+  normalizeLoudness: boolean;
+  audioToVideoMode: 'waveform' | 'slate';
+  useHardwareEncoder: boolean;
+  outputDir: string;
+}
 
 export type ThemeMode = 'antigravity-dark' | 'antigravity-light';
 
@@ -78,6 +123,8 @@ export interface FixerJobConfig {
   width: number;
   height: number;
   fps: number;
+  videoCodec?: string;
+  audioCodec?: string;
   preset: FixerPresetId;
   targetSizeMB: number;
   silenceThresholdDb: number;
@@ -127,6 +174,8 @@ export interface StemOutputPill {
   filePath: string;
   fileName: string;
 }
+
+export type OutputPill = StemOutputPill;
 
 export type JobStage =
   | 'queued'
@@ -247,12 +296,20 @@ export interface VortexApi {
     outputFilePath: string;
     pills: StemOutputPill[];
   }>;
+  selectMediaFiles: () => Promise<string[]>;
+  probeLocalMedia: (filePath: string) => Promise<LocalMediaMetadata>;
+  startConverterJob: (jobId: string, config: ConverterJobConfig) => Promise<{
+    outputFilePath: string;
+    pills: OutputPill[];
+    usedSmartCopy?: boolean;
+  }>;
   getPathForDroppedFile: (file: File) => string;
   cancelJob: (jobId: string) => Promise<boolean>;
   startNativeDrag: (filePath: string) => void;
   openFolder: (filePath: string) => Promise<void>;
-  selectOutputDirectory: () => Promise<string | null>;
+  selectOutputDirectory: (currentDir?: string) => Promise<string | null>;
   windowControl: (action: 'minimize' | 'maximize' | 'close') => Promise<void>;
+  setTheme?: (theme: string) => Promise<void>;
   setZoomFactor: (factor: number) => Promise<number>;
   getZoomFactor: () => Promise<number>;
   onJobProgress: (callback: (data: JobProgressEvent) => void) => () => void;
