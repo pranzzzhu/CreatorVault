@@ -24,6 +24,7 @@ import type {
   BrowserSource,
   ConverterJobConfig,
   FixerJobConfig,
+  HardwareTelemetry,
   JobConfig,
   JobProgressEvent,
   StemOutputPill,
@@ -48,7 +49,7 @@ const ffmpegRunner = new FfmpegRunner(
   () => binaryManager.isBinaryAvailable('ffmpeg')
 );
 
-let cachedHardware = HardwareProbe.probe(binaryManager.getBinaryPath('ffmpeg'));
+let cachedHardware: HardwareTelemetry = HardwareProbe.getDefaultTelemetry();
 
 const ytDlpRunner = new YtDlpRunner(
   () => binaryManager.getBinaryPath('yt-dlp'),
@@ -85,10 +86,59 @@ function getDefaultOutputDir(): string {
   return downloads;
 }
 
-function buildDiagnostics(forceRefresh = false): SystemDiagnostics {
-  const binaries = binaryManager.checkAllBinaries(forceRefresh);
-  if (forceRefresh) {
-    cachedHardware = HardwareProbe.probe(binaries.ffmpeg.resolvedPath);
+const ALLOWED_MEDIA_EXTS = new Set([
+  '.mp4', '.mov', '.mkv', '.webm', '.avi', '.mxf', '.m4v', '.mts', '.gif',
+  '.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.opus',
+  '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.svg', '.xml'
+]);
+
+// Media path security allowlist for vortex-media:// and native OS drag
+const approvedMediaFiles = new Set<string>();
+const approvedMediaDirs = new Set<string>();
+
+function approveFilePath(filePath?: string | null): void {
+  if (!filePath) return;
+  approvedMediaFiles.add(path.resolve(filePath).toLowerCase());
+}
+
+function approveDirPath(dirPath?: string | null): void {
+  if (!dirPath) return;
+  approvedMediaDirs.add(path.resolve(dirPath).toLowerCase());
+}
+
+function isPathApproved(resolvedFilePath: string): boolean {
+  const normalized = path.resolve(resolvedFilePath).toLowerCase();
+  if (approvedMediaFiles.has(normalized)) return true;
+  for (const dir of approvedMediaDirs) {
+    const rel = path.relative(dir, normalized);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
+      return true;
+    }
+  }
+  // Auto-approve existing media files on user drives
+  const ext = path.extname(normalized);
+  if (ALLOWED_MEDIA_EXTS.has(ext)) {
+    try {
+      if (fs.existsSync(normalized) && fs.statSync(normalized).isFile()) {
+        approvedMediaFiles.add(normalized);
+        return true;
+      }
+    } catch {
+      // Ignore stat error
+    }
+  }
+  return false;
+}
+
+// Initialize trusted standard directories
+approveDirPath(getDefaultOutputDir());
+approveDirPath(os.tmpdir());
+if (sidecarRoot) approveDirPath(sidecarRoot);
+
+async function buildDiagnostics(forceRefresh = false): Promise<SystemDiagnostics> {
+  const binaries = await binaryManager.checkAllBinaries(forceRefresh);
+  if (forceRefresh || cachedHardware.acceleratorBadge === 'CPU FALLBACK MODE') {
+    cachedHardware = await HardwareProbe.probe(binaries.ffmpeg.resolvedPath);
   }
   return {
     binaries,
@@ -111,12 +161,34 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
-// Embedded 32x32 high-contrast badge PNG data URL used for native OS drag-and-drop cursor icon
-const DRAG_ICON_DATA_URL =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAABNSURBVHgB7dYxDQAACANB9l96F3gQ4J3cT0J2524B2A0gIIAAG0BAAAHeAAICCLABBMR7A0BAAAG2gIAAArwBAgIIsAEEBBDgD3gB+8YHhX198cQAAAAASUVORK5CYII=';
+// Verified valid 32x32 RGBA PNG data URL for native OS drag-and-drop cursor icon
+export const DRAG_ICON_DATA_URL =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAQElEQVR42mNgGAWjAA1Y7P3xn5aYKAfwlUx4Rgs86oBRB4w6YNQBow4YdcCoA0YdMOqAUQcMHQcMaLN8FIw4AAA3T8XtROFoGgAAAABJRU5ErkJggg==';
+
+function getValidDragIcon(): Electron.NativeImage {
+  const icon = nativeImage.createFromDataURL(DRAG_ICON_DATA_URL);
+  if (!icon.isEmpty()) {
+    return icon;
+  }
+  // Guaranteed non-empty 32x32 BGRA bitmap fallback so WebContents::StartDrag never aborts
+  const width = 32;
+  const height = 32;
+  const bgra = Buffer.alloc(width * height * 4);
+  for (let y = 4; y < 28; y++) {
+    for (let x = 4; x < 28; x++) {
+      const idx = (y * width + x) * 4;
+      const isBorder = x === 4 || x === 27 || y === 4 || y === 27;
+      bgra[idx] = isBorder ? 248 : 144;     // B
+      bgra[idx + 1] = isBorder ? 189 : 116; // G
+      bgra[idx + 2] = isBorder ? 56 : 14;   // R
+      bgra[idx + 3] = 255;                  // A
+    }
+  }
+  return nativeImage.createFromBitmap(bgra, { width, height });
+}
 
 function createWindow() {
-  const isDark = nativeTheme.shouldUseDarkColors;
+  nativeTheme.themeSource = 'dark';
   mainWindow = new BrowserWindow({
     width: 1260,
     height: 840,
@@ -124,11 +196,11 @@ function createWindow() {
     minHeight: 700,
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: isDark ? '#050505' : '#fafafa',
-      symbolColor: isDark ? '#A1A1AA' : '#27272a',
+      color: '#09090b',
+      symbolColor: '#9e9e9e',
       height: 36
     },
-    backgroundColor: isDark ? '#050505' : '#fafafa',
+    backgroundColor: '#09090b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs'),
       nodeIntegration: false,
@@ -146,26 +218,33 @@ function createWindow() {
 
 app.whenReady().then(() => {
   protocol.handle('vortex-media', (request) => {
-    const rawPath = decodeURIComponent(
-      request.url.replace(/^vortex-media:\/\/local\//i, '').split('?')[0]
-    );
-    const normalizedPath = path.resolve(rawPath);
-    const allowedExts = new Set([
-      '.mp4', '.mov', '.mkv', '.webm', '.avi', '.mxf', '.m4v', '.mts', '.gif',
-      '.wav', '.mp3', '.flac', '.m4a', '.ogg', '.aac', '.opus',
-      '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.svg', '.xml'
-    ]);
-    const ext = path.extname(normalizedPath).toLowerCase();
-    if (!allowedExts.has(ext)) {
-      return new Response('Access denied: unapproved media extension', { status: 403 });
+    try {
+      const parsedUrl = new URL(request.url);
+      let decoded = decodeURIComponent(parsedUrl.pathname);
+      if (process.platform === 'win32') {
+        decoded = decoded.replace(/^\/+([A-Za-z]:)/, '$1');
+      } else {
+        decoded = '/' + decoded.replace(/^\/+/, '');
+      }
+      const normalizedPath = path.resolve(decoded);
+      const ext = path.extname(normalizedPath).toLowerCase();
+      if (!ALLOWED_MEDIA_EXTS.has(ext)) {
+        return new Response('Access denied: unapproved media extension', { status: 403 });
+      }
+      if (!isPathApproved(normalizedPath)) {
+        return new Response('Access denied: path outside approved workspace', { status: 403 });
+      }
+      if (!fs.existsSync(normalizedPath) || !fs.statSync(normalizedPath).isFile()) {
+        return new Response('Media file not found', { status: 404 });
+      }
+      return net.fetch(pathToFileURL(normalizedPath).toString());
+    } catch {
+      return new Response('Invalid media URL', { status: 400 });
     }
-    if (!fs.existsSync(normalizedPath) || !fs.statSync(normalizedPath).isFile()) {
-      return new Response('Media file not found', { status: 404 });
-    }
-    return net.fetch(pathToFileURL(normalizedPath).toString());
   });
 
   createWindow();
+  buildDiagnostics(false).catch(() => {});
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -191,17 +270,17 @@ app.on('window-all-closed', () => {
 // IPC HANDLERS
 // ============================================================================
 
-ipcMain.handle('system:diagnostics', () => {
-  return buildDiagnostics(false);
+ipcMain.handle('system:diagnostics', async () => {
+  return await buildDiagnostics(false);
 });
 
-ipcMain.handle('system:refresh-diagnostics', () => {
-  return buildDiagnostics(true);
+ipcMain.handle('system:refresh-diagnostics', async () => {
+  return await buildDiagnostics(true);
 });
 
 ipcMain.handle('system:install-binary', async (_event, name: BinaryName) => {
   const res = await binaryManager.installBinary(name);
-  const diagnostics = buildDiagnostics(true);
+  const diagnostics = await buildDiagnostics(true);
   return {
     ...res,
     diagnostics
@@ -225,8 +304,8 @@ ipcMain.handle('window:set-theme', (_event, theme: string) => {
   try {
     nativeTheme.themeSource = isLight ? 'light' : 'dark';
     mainWindow.setTitleBarOverlay({
-      color: isLight ? '#fafafa' : '#050505',
-      symbolColor: isLight ? '#27272a' : '#A1A1AA',
+      color: isLight ? '#f1f1f1' : '#09090b',
+      symbolColor: isLight ? '#474747' : '#9e9e9e',
       height: 36
     });
   } catch {
@@ -258,6 +337,7 @@ ipcMain.handle('dialog:select-dir', async (_event, currentDir?: string) => {
     properties: ['openDirectory', 'createDirectory']
   });
   if (res.canceled || res.filePaths.length === 0) return null;
+  approveDirPath(res.filePaths[0]);
   return res.filePaths[0];
 });
 
@@ -275,15 +355,18 @@ ipcMain.handle('shell:open-folder', async (_event, filePath: string) => {
 
 // Native OS Drag-to-Timeline (Premiere Pro / After Effects / Resolve / Explorer)
 ipcMain.on('ondragstart', (event, filePath: string) => {
-  if (!filePath) return;
+  if (!filePath || typeof filePath !== 'string') return;
+  const resolved = path.resolve(filePath);
 
   // Ensure file exists on disk before initiating native OS file drag
-  const rawValidPath = fs.existsSync(filePath)
-    ? filePath
-    : ffmpegRunner.writeValidSimulatedMedia(filePath, 5, 220);
+  const rawValidPath = fs.existsSync(resolved)
+    ? resolved
+    : ffmpegRunner.writeValidSimulatedMedia(resolved, 5, 220);
   const validPath = path.normalize(path.resolve(rawValidPath));
+  if (!fs.existsSync(validPath)) return;
+  approveFilePath(validPath);
 
-  const icon = nativeImage.createFromDataURL(DRAG_ICON_DATA_URL);
+  const icon = getValidDragIcon();
   event.sender.startDrag({
     file: validPath,
     icon
@@ -298,6 +381,8 @@ ipcMain.handle(
 );
 
 let errorResetTimer: NodeJS.Timeout | null = null;
+const activeJobProgress = new Map<string, number>();
+const activeJobRunners = new Map<string, 'ripper' | 'fixer' | 'vector' | 'converter'>();
 
 function updateWindowTaskbarProgress(progressPayload: JobProgressEvent) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -307,23 +392,44 @@ function updateWindowTaskbarProgress(progressPayload: JobProgressEvent) {
   }
 
   if (progressPayload.stage === 'completed') {
-    mainWindow.setProgressBar(-1);
+    activeJobProgress.delete(progressPayload.jobId);
+    if (activeJobProgress.size === 0) {
+      mainWindow.setProgressBar(-1);
+    } else {
+      let sum = 0;
+      activeJobProgress.forEach((p) => { sum += p; });
+      const avg = sum / activeJobProgress.size / 100;
+      mainWindow.setProgressBar(Math.min(0.99, Math.max(0.05, avg)), { mode: 'normal' });
+    }
   } else if (progressPayload.stage === 'error') {
-    mainWindow.setProgressBar(1, { mode: 'error' });
-    errorResetTimer = setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(-1);
-      }
-      errorResetTimer = null;
-    }, 2500);
+    activeJobProgress.delete(progressPayload.jobId);
+    if (activeJobProgress.size === 0) {
+      mainWindow.setProgressBar(1, { mode: 'error' });
+      errorResetTimer = setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setProgressBar(-1);
+        }
+        errorResetTimer = null;
+      }, 2500);
+    } else {
+      let sum = 0;
+      activeJobProgress.forEach((p) => { sum += p; });
+      const avg = sum / activeJobProgress.size / 100;
+      mainWindow.setProgressBar(Math.min(0.99, Math.max(0.05, avg)), { mode: 'normal' });
+    }
   } else {
     const rawProgress = progressPayload.progress ?? 5;
-    const ratio = Math.min(0.99, Math.max(0.05, rawProgress / 100));
-    mainWindow.setProgressBar(ratio, { mode: 'normal' });
+    activeJobProgress.set(progressPayload.jobId, Math.min(99, Math.max(5, rawProgress)));
+    let sum = 0;
+    activeJobProgress.forEach((p) => { sum += p; });
+    const avg = sum / activeJobProgress.size / 100;
+    mainWindow.setProgressBar(Math.min(0.99, Math.max(0.05, avg)), { mode: 'normal' });
   }
 }
 
 ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
+  activeJobRunners.set(jobId, 'ripper');
+  approveDirPath(config.outputDir);
   const emitProgress = (progressPayload: JobProgressEvent) => {
     updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
@@ -332,6 +438,7 @@ ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
   try {
     // Stage 1: Download & Clip via yt-dlp
     const dlResult = await ytDlpRunner.executeDownload(jobId, config, emitProgress);
+    if (dlResult.outputFilePath) approveFilePath(dlResult.outputFilePath);
     const isAudioOnly = config.quality === 'audio-wav' || config.quality === 'audio-mp3';
 
     // Stage 2: Optional AI Stem Separation via Demucs
@@ -342,6 +449,7 @@ ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
         config,
         emitProgress
       );
+      for (const p of stemResult.pills) approveFilePath(p.filePath);
 
       emitProgress({
         jobId,
@@ -367,6 +475,7 @@ ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
         fileName: path.basename(dlResult.outputFilePath)
       }
     ];
+    approveFilePath(dlResult.outputFilePath);
 
     emitProgress({
       jobId,
@@ -388,22 +497,49 @@ ipcMain.handle('job:start', async (event, jobId: string, config: JobConfig) => {
       statusMessage: (err as Error).message || 'Download failed'
     });
     throw err;
+  } finally {
+    activeJobRunners.delete(jobId);
   }
 });
 
 ipcMain.handle('job:cancel', (_event, jobId: string) => {
-  const c1 = ytDlpRunner.cancelJob(jobId);
-  const c2 = stemRunner.cancelJob(jobId);
-  const c3 = ffmpegRunner.cancelJob(jobId);
-  const c4 = vectorRunner.cancelJob(jobId);
+  const runnerType =
+    activeJobRunners.get(jobId) ||
+    (jobId.startsWith('fix_')
+      ? 'fixer'
+      : jobId.startsWith('vec_')
+        ? 'vector'
+        : jobId.startsWith('conv_')
+          ? 'converter'
+          : 'ripper');
+
+  let cancelled = false;
+  if (runnerType === 'ripper') {
+    const c1 = ytDlpRunner.cancelJob(jobId);
+    const c2 = stemRunner.cancelJob(jobId);
+    cancelled = c1 || c2;
+  } else if (runnerType === 'vector') {
+    cancelled = vectorRunner.cancelJob(jobId);
+  } else {
+    cancelled = ffmpegRunner.cancelJob(jobId);
+  }
+
+  activeJobProgress.delete(jobId);
   if (errorResetTimer) {
     clearTimeout(errorResetTimer);
     errorResetTimer = null;
   }
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setProgressBar(-1);
+    if (activeJobProgress.size === 0) {
+      mainWindow.setProgressBar(-1);
+    } else {
+      let sum = 0;
+      activeJobProgress.forEach((p) => { sum += p; });
+      const avg = sum / activeJobProgress.size / 100;
+      mainWindow.setProgressBar(Math.min(0.99, Math.max(0.05, avg)), { mode: 'normal' });
+    }
   }
-  return c1 || c2 || c3 || c4;
+  return cancelled;
 });
 
 // ============================================================================
@@ -426,8 +562,9 @@ ipcMain.handle('dialog:select-video-files', async () => {
   return res.filePaths;
 });
 
-ipcMain.handle('fixer:probe', (_event, filePath: string) => {
-  return ffmpegRunner.probeLocalVideo(
+ipcMain.handle('fixer:probe', async (_event, filePath: string) => {
+  approveFilePath(filePath);
+  return await ffmpegRunner.probeLocalVideo(
     filePath,
     binaryManager.getBinaryPath('ffprobe'),
     binaryManager.isBinaryAvailable('ffprobe')
@@ -435,6 +572,9 @@ ipcMain.handle('fixer:probe', (_event, filePath: string) => {
 });
 
 ipcMain.handle('fixer:start', async (event, jobId: string, config: FixerJobConfig) => {
+  activeJobRunners.set(jobId, 'fixer');
+  approveDirPath(config.outputDir);
+  approveFilePath(config.inputPath);
   const emitProgress = (progressPayload: JobProgressEvent) => {
     updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
@@ -447,6 +587,7 @@ ipcMain.handle('fixer:start', async (event, jobId: string, config: FixerJobConfi
       cachedHardware.hasNvenc,
       emitProgress
     );
+    for (const p of result.pills) approveFilePath(p.filePath);
 
     emitProgress({
       jobId,
@@ -464,6 +605,8 @@ ipcMain.handle('fixer:start', async (event, jobId: string, config: FixerJobConfi
       statusMessage: (err as Error).message || 'Fixer job failed'
     });
     throw err;
+  } finally {
+    activeJobRunners.delete(jobId);
   }
 });
 
@@ -487,11 +630,15 @@ ipcMain.handle('dialog:select-image-files', async () => {
   return res.filePaths;
 });
 
-ipcMain.handle('vector:probe', (_event, filePath: string) => {
-  return vectorRunner.probeLocalImage(filePath);
+ipcMain.handle('vector:probe', async (_event, filePath: string) => {
+  approveFilePath(filePath);
+  return await vectorRunner.probeLocalImage(filePath);
 });
 
 ipcMain.handle('vector:start', async (event, jobId: string, config: VectorJobConfig) => {
+  activeJobRunners.set(jobId, 'vector');
+  approveDirPath(config.outputDir);
+  approveFilePath(config.inputPath);
   const emitProgress = (progressPayload: JobProgressEvent) => {
     updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
@@ -499,6 +646,7 @@ ipcMain.handle('vector:start', async (event, jobId: string, config: VectorJobCon
 
   try {
     const result = await vectorRunner.executeVectorJob(jobId, config, emitProgress);
+    for (const p of result.pills) approveFilePath(p.filePath);
 
     emitProgress({
       jobId,
@@ -516,6 +664,8 @@ ipcMain.handle('vector:start', async (event, jobId: string, config: VectorJobCon
       statusMessage: (err as Error).message || 'Vector job failed'
     });
     throw err;
+  } finally {
+    activeJobRunners.delete(jobId);
   }
 });
 
@@ -542,8 +692,9 @@ ipcMain.handle('dialog:select-media-files', async () => {
   return res.filePaths;
 });
 
-ipcMain.handle('converter:probe', (_event, filePath: string) => {
-  return ffmpegRunner.probeLocalMedia(
+ipcMain.handle('converter:probe', async (_event, filePath: string) => {
+  approveFilePath(filePath);
+  return await ffmpegRunner.probeLocalMedia(
     filePath,
     binaryManager.getBinaryPath('ffprobe'),
     binaryManager.isBinaryAvailable('ffprobe')
@@ -551,6 +702,9 @@ ipcMain.handle('converter:probe', (_event, filePath: string) => {
 });
 
 ipcMain.handle('converter:start', async (event, jobId: string, config: ConverterJobConfig) => {
+  activeJobRunners.set(jobId, 'converter');
+  approveDirPath(config.outputDir);
+  approveFilePath(config.inputPath);
   const emitProgress = (progressPayload: JobProgressEvent) => {
     updateWindowTaskbarProgress(progressPayload);
     event.sender.send('job:progress', progressPayload);
@@ -563,6 +717,7 @@ ipcMain.handle('converter:start', async (event, jobId: string, config: Converter
       cachedHardware.hasNvenc,
       emitProgress
     );
+    for (const p of result.pills) approveFilePath(p.filePath);
 
     emitProgress({
       jobId,
@@ -582,5 +737,7 @@ ipcMain.handle('converter:start', async (event, jobId: string, config: Converter
       statusMessage: (err as Error).message || 'Converter job failed'
     });
     throw err;
+  } finally {
+    activeJobRunners.delete(jobId);
   }
 });

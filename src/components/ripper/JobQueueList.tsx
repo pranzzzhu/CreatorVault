@@ -9,7 +9,6 @@ import {
   GripVertical,
   Guitar,
   Image as ImageIcon,
-  Info,
   Loader2,
   Mic,
   Music,
@@ -22,6 +21,17 @@ import {
   VolumeX,
   XCircle
 } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
+import { ButtonGroup } from '@astryxdesign/core/ButtonGroup';
+import { Card } from '@astryxdesign/core/Card';
+import { Divider } from '@astryxdesign/core/Divider';
+import { EmptyState } from '@astryxdesign/core/EmptyState';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { InfoTip } from '@astryxdesign/core/InfoTip';
+import { HStack, VStack } from '@astryxdesign/core/Layout';
+import { ProgressBar } from '@astryxdesign/core/ProgressBar';
+import { Text } from '@astryxdesign/core/Text';
 import { useJobStore } from '../../store/useJobStore';
 import type { JobItem, StemOutputPill } from '../../types/media';
 
@@ -71,15 +81,21 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
   const [mutedIds, setMutedIds] = useState<Record<string, boolean>>({});
   const [progressRatio, setProgressRatio] = useState(0);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const gainNodesRef = useRef<Record<string, GainNode>>({});
+  const mediaElementSourcesRef = useRef<Record<string, MediaElementAudioSourceNode>>({});
 
   useEffect(() => {
+    const ctx = audioCtxRef.current;
     for (const pill of stemPills) {
-      const el = audioRefs.current[pill.id];
-      if (!el) continue;
-      if (soloId) {
-        el.muted = pill.id !== soloId;
+      const gain = gainNodesRef.current[pill.id];
+      const shouldMute = soloId ? pill.id !== soloId : Boolean(mutedIds[pill.id]);
+      const targetVal = shouldMute ? 0 : 1;
+      if (gain && ctx) {
+        gain.gain.setTargetAtTime(targetVal, ctx.currentTime, 0.015);
       } else {
-        el.muted = Boolean(mutedIds[pill.id]);
+        const el = audioRefs.current[pill.id];
+        if (el) el.muted = shouldMute;
       }
     }
   }, [soloId, mutedIds, stemPills]);
@@ -91,19 +107,56 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
           el.pause();
         }
       });
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        audioCtxRef.current.close().catch(() => {});
+      }
     };
   }, []);
 
   if (stemPills.length <= 1) return null;
 
-  const togglePlayAll = () => {
+  const togglePlayAll = async () => {
     if (isPlaying) {
       Object.values(audioRefs.current).forEach((el) => el?.pause());
       setIsPlaying(false);
     } else {
+      if (!audioCtxRef.current) {
+        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtxClass) {
+          audioCtxRef.current = new AudioCtxClass();
+        }
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx && ctx.state === 'suspended') {
+        await ctx.resume().catch(() => {});
+      }
+
+      if (ctx) {
+        for (const pill of stemPills) {
+          const el = audioRefs.current[pill.id];
+          if (el && !mediaElementSourcesRef.current[pill.id]) {
+            try {
+              const src = ctx.createMediaElementSource(el);
+              const gain = ctx.createGain();
+              const shouldMute = soloId ? pill.id !== soloId : Boolean(mutedIds[pill.id]);
+              gain.gain.value = shouldMute ? 0 : 1;
+              src.connect(gain);
+              gain.connect(ctx.destination);
+              mediaElementSourcesRef.current[pill.id] = src;
+              gainNodesRef.current[pill.id] = gain;
+            } catch {
+              // Element already connected or fallback
+            }
+          }
+        }
+      }
+
+      const masterEl = audioRefs.current[stemPills[0]?.id];
+      const targetTime =
+        masterEl && Number.isFinite(masterEl.currentTime) ? masterEl.currentTime : 0;
       Object.values(audioRefs.current).forEach((el) => {
         if (el) {
-          el.currentTime = 0;
+          el.currentTime = targetTime;
           el.play().catch(() => {});
         }
       });
@@ -121,28 +174,26 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
   };
 
   return (
-    <div className="border-t border-base-300 pt-3 space-y-2.5">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <button
-            type="button"
+    <VStack gap={2} className="pt-2">
+      <Divider />
+      <HStack vAlign="center" hAlign="between">
+        <HStack vAlign="center" gap={2}>
+          <IconButton
+            label={isPlaying ? 'Pause Stem Mixer' : 'Preview & Audition Stems'}
+            variant="primary"
+            size="sm"
+            icon={isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
             onClick={togglePlayAll}
-            className="btn btn-xs btn-circle btn-primary"
-            title={isPlaying ? 'Pause Stem Mixer' : 'Preview & Audition Stems'}
-          >
-            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
-          </button>
-          <span className="text-xs font-medium text-base-content">
+          />
+          <Text size="sm" weight="medium" color="primary">
             Preview split tracks
-          </span>
-        </div>
+          </Text>
+        </HStack>
 
-        <span className="badge badge-xs badge-ghost num">
-          {soloId ? 'Solo active' : '48kHz PCM'}
-        </span>
-      </div>
+        <Badge variant="neutral" label={soloId ? 'Solo active' : '48kHz PCM'} />
+      </HStack>
 
-      <div className="divide-y divide-base-300 border-y border-base-300">
+      <div className="divide-y divide-border border-y border-border">
         {stemPills.map((pill, pillIdx) => {
           const isMuted = soloId ? pill.id !== soloId : Boolean(mutedIds[pill.id]);
           const isSolo = soloId === pill.id;
@@ -184,11 +235,9 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
                 }}
               />
 
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="text-xs text-base-content truncate num">
-                  {pill.label}
-                </span>
-              </div>
+              <Text size="sm" color="primary" maxLines={1} className="num min-w-0">
+                {pill.label}
+              </Text>
 
               <div className="flex items-center gap-[2px] h-4 mx-2">
                 {Array.from({ length: 16 }).map((_, barIdx) => {
@@ -200,42 +249,38 @@ const StemAudioMixer: React.FC<StemAudioMixerProps> = ({ pills }) => {
                         height: `${25 + ((barIdx * 23 + pillIdx * 11) % 75)}%`
                       }}
                       className={`w-[2px] rounded-full transition-colors duration-150 ${
-                        isPlaying && !isMuted && activeBar
-                          ? 'bg-accent'
-                          : 'bg-base-300'
+                        isPlaying && !isMuted && activeBar ? 'bg-info' : 'bg-border-strong'
                       }`}
                     />
                   );
                 })}
               </div>
 
-              <div className="join shrink-0">
-                <button
-                  type="button"
+              <ButtonGroup label={`Controls for ${pill.label}`} size="sm" className="shrink-0">
+                <Button
+                  label="S"
+                  variant={isSolo ? 'primary' : 'secondary'}
+                  tooltip="Solo Stem"
                   onClick={() => toggleSolo(pill.id)}
-                  title="Solo Stem (S)"
-                  className={`btn btn-xs join-item ${
-                    isSolo ? 'btn-primary' : 'btn-outline'
-                  }`}
-                >
-                  S
-                </button>
-                <button
-                  type="button"
+                />
+                <IconButton
+                  label={isMuted ? 'Unmute Stem' : 'Mute Stem'}
+                  variant={isMuted ? 'destructive' : 'secondary'}
+                  icon={
+                    isMuted ? (
+                      <VolumeX className="w-3 h-3" />
+                    ) : (
+                      <Volume2 className="w-3 h-3" />
+                    )
+                  }
                   onClick={() => toggleMute(pill.id)}
-                  title="Mute Stem (M)"
-                  className={`btn btn-xs join-item ${
-                    isMuted ? 'btn-error' : 'btn-outline'
-                  }`}
-                >
-                  {isMuted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-                </button>
-              </div>
+                />
+              </ButtonGroup>
             </div>
           );
         })}
       </div>
-    </div>
+    </VStack>
   );
 };
 
@@ -249,170 +294,178 @@ const JobCard: React.FC<{ job: JobItem }> = ({ job }) => {
     job.stage === 'remuxing' ||
     job.stage === 'separating_stems';
 
+  const progressVariant =
+    job.stage === 'error' ? 'error' : job.stage === 'completed' ? 'success' : 'accent';
+
   return (
-    <div className="card bg-base-200 border border-base-300 p-4 space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
-          {job.stage === 'completed' ? (
-            <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
-          ) : job.stage === 'error' ? (
-            <XCircle className="w-4 h-4 text-error shrink-0" />
-          ) : (
-            <Loader2 className="w-4 h-4 text-accent animate-spin shrink-0" />
-          )}
+    <Card padding={4} className="bg-surface">
+      <VStack gap={3}>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            {job.stage === 'completed' ? (
+              <CheckCircle2 className="w-4 h-4 text-success shrink-0" />
+            ) : job.stage === 'error' ? (
+              <XCircle className="w-4 h-4 text-error shrink-0" />
+            ) : (
+              <Loader2 className="w-4 h-4 text-info animate-spin shrink-0" />
+            )}
 
-          {job.config.thumbnail && (
-            <img
-              src={job.config.thumbnail}
-              alt={job.config.title}
-              className="w-8 h-8 rounded object-cover bg-base-300 border border-base-300 shrink-0"
-            />
-          )}
+            {job.config.thumbnail && (
+              <img
+                src={job.config.thumbnail}
+                alt={job.config.title}
+                className="w-8 h-8 rounded-sm object-cover bg-muted border border-border shrink-0"
+              />
+            )}
 
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <h4 className="text-xs font-semibold text-base-content truncate">
-                {job.config.title}
-              </h4>
-              <span className="badge badge-xs badge-neutral shrink-0 num">
-                {job.config.quality}
-              </span>
-              {job.config.duration > 0 && !job.config.trimEnabled && (
-                <span className="badge badge-xs badge-ghost shrink-0 num">
-                  {job.config.duration.toFixed(1)}s
-                </span>
-              )}
-              {job.config.trimEnabled && (
-                <span className="badge badge-xs badge-accent shrink-0 num">
-                  {(job.config.endTime - job.config.startTime).toFixed(1)}s clip
-                </span>
-              )}
-              {job.usedSimulation && (
-                <span className="badge badge-xs badge-warning shrink-0">
-                  Simulated
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-base-content/60 truncate mt-0.5">
-              {job.statusMessage}
-            </p>
-          </div>
-        </div>
+            <VStack gap={0.5} className="min-w-0 flex-1">
+              <HStack vAlign="center" gap={2} wrap="wrap">
+                <Text size="sm" weight="semibold" color="primary" maxLines={1}>
+                  {job.config.title}
+                </Text>
+                <Badge variant="neutral" label={job.config.quality} />
+                {job.config.duration > 0 && !job.config.trimEnabled && (
+                  <Badge variant="neutral" label={`${job.config.duration.toFixed(1)}s`} />
+                )}
+                {job.config.trimEnabled && (
+                  <Badge
+                    variant="info"
+                    label={`${(job.config.endTime - job.config.startTime).toFixed(1)}s clip`}
+                  />
+                )}
+                {job.usedSimulation && <Badge variant="warning" label="Simulated" />}
+              </HStack>
 
-        <div className="flex items-center gap-2 shrink-0">
-          {isRunning && (
-            <div className="flex items-center gap-2 text-xs text-base-content/60 num">
-              {job.speed !== '—' && <span>{job.speed}</span>}
-              <span className="text-base-content font-semibold">{job.progress}%</span>
-            </div>
-          )}
-
-          {job.outputFilePath && (
-            <button
-              type="button"
-              onClick={() => window.vortexApi?.openFolder(job.outputFilePath!)}
-              title="Reveal in Explorer / Finder"
-              className="btn btn-xs btn-ghost btn-square"
-            >
-              <FolderOpen className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          {isRunning ? (
-            <button
-              type="button"
-              onClick={() => cancelJob(job.id)}
-              title="Cancel Job"
-              className="btn btn-xs btn-error btn-outline"
-            >
-              Abort
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => removeJob(job.id)}
-              title="Remove from queue"
-              className="btn btn-xs btn-ghost btn-square text-base-content/60 hover:text-error"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      </div>
-
-      <progress
-        className={`progress w-full h-1.5 ${
-          job.stage === 'error'
-            ? 'progress-error'
-            : job.stage === 'completed'
-              ? 'progress-success'
-              : 'progress-accent'
-        }`}
-        value={job.progress}
-        max={100}
-      />
-
-      {job.stage === 'completed' && job.pills.length > 0 && (
-        <div className="space-y-3 pt-1">
-          {job.vmafComparison && (
-            <div className="flex flex-wrap items-center gap-2.5 p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/40 text-xs">
-              <div className="flex items-center gap-1.5 font-medium text-emerald-300">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>Compression Armor:</span>
-              </div>
-
-              <div className="flex items-center gap-2 num text-[11px]">
-                <span className="text-base-content/70">
-                  Raw Upload: <strong className="font-semibold text-base-content">{job.vmafComparison.rawScore.toFixed(1)}</strong>
-                </span>
-                <span className="text-emerald-400 font-bold">&rarr;</span>
-                <span className="text-emerald-300">
-                  Armored: <strong className="font-bold text-white">{job.vmafComparison.optimizedScore.toFixed(1)}</strong>
-                </span>
-              </div>
-
-              <span className="badge badge-xs badge-success text-[10px] font-bold num">
-                +{(job.vmafComparison.optimizedScore - job.vmafComparison.rawScore).toFixed(1)} Lift
-              </span>
-
-              {job.vmafComparison.simulatedPreviewPath && (
-                <span className="text-[10px] text-base-content/50 ml-auto num">
-                  (Simulated platform transcode: 3.5Mbps CRF 25)
-                </span>
-              )}
-            </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-base-content/60 mr-1">
-              Drag to timeline:
-            </span>
-
-            {job.pills.map((pill) => {
-              const Icon = getPillIcon(pill.type);
-              return (
-                <div
-                  key={pill.id}
-                  draggable
-                  onDragStart={(e) => {
-                    e.preventDefault();
-                    window.vortexApi?.startNativeDrag(pill.filePath);
-                  }}
-                  title={`Click and drag "${pill.fileName}" straight into Premiere Pro, After Effects, DaVinci Resolve, FL Studio, or Desktop.\nPath: ${pill.filePath}`}
-                  className="btn btn-xs btn-outline gap-1.5 cursor-grab active:cursor-grabbing font-normal num"
-                >
-                  <GripVertical className="w-3 h-3 opacity-60" />
-                  <Icon className="w-3.5 h-3.5 text-accent" />
-                  <span>{pill.label}</span>
-                </div>
-              );
-            })}
+              <Text type="supporting" size="sm" color="secondary" maxLines={1}>
+                {job.statusMessage}
+              </Text>
+            </VStack>
           </div>
 
-          <StemAudioMixer pills={job.pills} />
+          <HStack vAlign="center" gap={2} className="shrink-0">
+            {isRunning && (
+              <HStack vAlign="center" gap={2} className="num">
+                {job.speed !== '—' && (
+                  <Text size="sm" color="secondary">
+                    {job.speed}
+                  </Text>
+                )}
+                <Text size="sm" weight="semibold" color="primary">
+                  {job.progress}%
+                </Text>
+              </HStack>
+            )}
+
+            {job.outputFilePath && (
+              <IconButton
+                label="Reveal in Explorer / Finder"
+                variant="ghost"
+                size="sm"
+                icon={<FolderOpen className="w-3.5 h-3.5" />}
+                onClick={() => window.vortexApi?.openFolder(job.outputFilePath!)}
+              />
+            )}
+
+            {isRunning ? (
+              <Button
+                label="Abort"
+                variant="destructive"
+                size="sm"
+                onClick={() => cancelJob(job.id)}
+              />
+            ) : (
+              <IconButton
+                label="Remove from queue"
+                variant="ghost"
+                size="sm"
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                onClick={() => removeJob(job.id)}
+              />
+            )}
+          </HStack>
         </div>
-      )}
-    </div>
+
+        <ProgressBar
+          label={job.config.title}
+          isLabelHidden
+          value={job.progress}
+          max={100}
+          variant={progressVariant}
+        />
+
+        {job.stage === 'completed' && job.pills.length > 0 && (
+          <VStack gap={3} className="pt-1">
+            {job.vmafComparison && (
+              <div className="flex flex-wrap items-center gap-2.5 p-2.5 rounded-md bg-success-muted/30 border border-success text-xs">
+                <HStack vAlign="center" gap={1.5}>
+                  <ShieldCheck className="w-4 h-4 text-success shrink-0" />
+                  <Text size="sm" weight="medium" className="text-success">
+                    Compression Armor:
+                  </Text>
+                </HStack>
+
+                <HStack vAlign="center" gap={2} className="num">
+                  <Text size="sm" color="secondary">
+                    Raw Upload:{' '}
+                    <strong className="font-semibold text-primary">
+                      {job.vmafComparison.rawScore.toFixed(1)}
+                    </strong>
+                  </Text>
+                  <span className="text-success font-bold">&rarr;</span>
+                  <Text size="sm" className="text-success">
+                    Armored:{' '}
+                    <strong className="font-bold">
+                      {job.vmafComparison.optimizedScore.toFixed(1)}
+                    </strong>
+                  </Text>
+                </HStack>
+
+                <Badge
+                  variant="success"
+                  label={`+${(
+                    job.vmafComparison.optimizedScore - job.vmafComparison.rawScore
+                  ).toFixed(1)} Lift`}
+                />
+
+                {job.vmafComparison.simulatedPreviewPath && (
+                  <Text size="sm" color="secondary" className="ml-auto num">
+                    (Simulated platform transcode: 3.5Mbps CRF 25)
+                  </Text>
+                )}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <Text size="sm" color="secondary" className="mr-1">
+                Drag to timeline:
+              </Text>
+
+              {job.pills.map((pill) => {
+                const Icon = getPillIcon(pill.type);
+                return (
+                  <div
+                    key={pill.id}
+                    draggable={true}
+                    onDragStart={(e) => {
+                      e.preventDefault();
+                      window.vortexApi?.startNativeDrag(pill.filePath);
+                    }}
+                    title={`Click and drag "${pill.fileName}" straight into Premiere Pro, After Effects, DaVinci Resolve, FL Studio, or Desktop.\nPath: ${pill.filePath}`}
+                    className="native-drag-pill inline-flex items-center gap-1.5 px-2.5 py-1 rounded-sm border border-info/50 bg-info-muted/30 hover:bg-info-muted/50 text-xs text-primary cursor-grab active:cursor-grabbing transition-colors num"
+                  >
+                    <GripVertical className="w-3 h-3 text-secondary pointer-events-none" />
+                    <Icon className="w-3.5 h-3.5 text-info pointer-events-none" />
+                    <span className="pointer-events-none">{pill.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <StemAudioMixer pills={job.pills} />
+          </VStack>
+        )}
+      </VStack>
+    </Card>
   );
 };
 
@@ -420,49 +473,39 @@ export const JobQueueList: React.FC = () => {
   const jobs = useJobStore((s) => s.jobs);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between px-1">
-        <div className="flex items-center gap-1.5">
-          <span className="text-xs font-semibold text-base-content/80">
+    <VStack gap={3}>
+      <HStack vAlign="center" hAlign="between" className="px-1">
+        <HStack vAlign="center" gap={1.5}>
+          <Text size="sm" weight="semibold" color="secondary">
             Finished Files & Downloads ({jobs.length})
-          </span>
-          <div
-            className="tooltip tooltip-right"
-            data-tip="Completed stem pills use Electron's native OS file drag (startDrag). Drag any pill straight onto your Premiere Pro, Resolve, or FL Studio timeline."
-          >
-            <button
-              type="button"
-              aria-label="Native OS drag instructions"
-              className="btn btn-ghost btn-xs btn-circle text-base-content/50 hover:text-base-content"
-            >
-              <Info className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-        <span className="text-xs text-base-content/50">
+          </Text>
+          <InfoTip
+            label="Native OS drag instructions"
+            size="xsm"
+            content="Completed stem pills use Electron's native OS file drag (startDrag). Drag any pill straight onto your Premiere Pro, Resolve, or FL Studio timeline."
+          />
+        </HStack>
+
+        <Text size="sm" color="secondary">
           Drag any file button below into your editor
-        </span>
-      </div>
+        </Text>
+      </HStack>
 
       {jobs.length === 0 ? (
-        <div className="card bg-base-200 border border-dashed border-base-300 p-6 flex flex-row items-center justify-between">
-          <div>
-            <p className="text-xs font-medium text-base-content">
-              No files yet
-            </p>
-            <p className="text-xs text-base-content/60 mt-0.5">
-              Paste a link above or drop a file in any tab to get started.
-            </p>
-          </div>
-          <span className="badge badge-sm badge-ghost">Idle</span>
-        </div>
+        <Card variant="muted" padding={2} className="border border-dashed border-border-strong">
+          <EmptyState
+            isCompact
+            title="No files yet"
+            description="Paste a link above or drop a file in any tab to get started."
+          />
+        </Card>
       ) : (
-        <div className="space-y-3">
+        <VStack gap={3}>
           {jobs.map((job) => (
             <JobCard key={job.id} job={job} />
           ))}
-        </div>
+        </VStack>
       )}
-    </div>
+    </VStack>
   );
 };

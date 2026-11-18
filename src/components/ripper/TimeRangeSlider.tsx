@@ -1,5 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Scissors } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
+import { ButtonGroup } from '@astryxdesign/core/ButtonGroup';
+import { Divider } from '@astryxdesign/core/Divider';
+import { HStack, VStack } from '@astryxdesign/core/Layout';
+import { Switch } from '@astryxdesign/core/Switch';
+import { Text } from '@astryxdesign/core/Text';
 
 interface TimeRangeSliderProps {
   duration: number;
@@ -128,33 +135,28 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
   const clipDuration = Math.max(0, endTime - startTime);
 
   return (
-    <div className="border-y border-base-300 py-3.5 space-y-3">
-      <div className="flex items-center justify-between">
-        <label className="flex items-center gap-2.5 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={trimEnabled}
-            onChange={(e) => onToggleTrim(e.target.checked)}
-            className="toggle toggle-sm toggle-primary"
-          />
-          <span className="flex items-center gap-1.5 text-xs font-medium text-base-content">
-            <Scissors className="w-3.5 h-3.5 text-accent" />
-            <span>Cut a specific clip</span>
-          </span>
-        </label>
+    <VStack gap={3}>
+      <Divider />
+      <HStack vAlign="center" hAlign="between" gap={3}>
+        <Switch
+          label="Cut a specific clip"
+          labelIcon={<Scissors className="w-3.5 h-3.5 text-info" />}
+          size="sm"
+          value={trimEnabled}
+          onChange={(checked) => onToggleTrim(checked)}
+        />
 
-        <div className="flex items-center gap-2 text-xs">
-          {trimEnabled ? (
-            <span className="badge badge-sm badge-neutral num">
-              Clip length: {clipDuration.toFixed(1)}s (drag blue bar to move)
-            </span>
-          ) : (
-            <span className="text-base-content/50 num">
-              Full length ({formatMmSsMs(duration)})
-            </span>
-          )}
-        </div>
-      </div>
+        {trimEnabled ? (
+          <Badge
+            variant="info"
+            label={`Clip length: ${clipDuration.toFixed(1)}s (drag bar to move)`}
+          />
+        ) : (
+          <Text size="sm" color="secondary" className="num">
+            Full length ({formatMmSsMs(duration)})
+          </Text>
+        )}
+      </HStack>
 
       <div
         className={`space-y-3 transition-opacity duration-150 ${
@@ -177,19 +179,19 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
               onChangeRange(startTime, Math.max(clickedSec, startTime + 1));
             }
           }}
-          className="relative h-8 bg-base-100 border border-base-300 rounded-lg cursor-pointer flex items-center px-1 overflow-visible select-none"
+          className="relative h-8 bg-body border border-border rounded-md cursor-pointer flex items-center px-1 overflow-visible select-none"
         >
           <div className="absolute inset-0 flex items-center justify-between px-3 pointer-events-none opacity-25">
             {Array.from({ length: 36 }).map((_, idx) => (
               <div
                 key={idx}
                 style={{ height: `${25 + ((idx * 17) % 55)}%` }}
-                className="w-[2px] bg-base-content rounded-full"
+                className="w-[2px] bg-secondary rounded-full"
               />
             ))}
           </div>
 
-          {/* Draggable Blue Highlight Window */}
+          {/* Draggable Highlight Window */}
           <div
             onMouseDown={(e) => {
               e.stopPropagation();
@@ -205,9 +207,9 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
               width: `${Math.max(1, endPercent - startPercent)}%`
             }}
             title="Click and drag to move the entire clip window"
-            className="absolute top-0 bottom-0 bg-accent/25 hover:bg-accent/35 border-y border-accent cursor-grab active:cursor-grabbing z-10 flex items-center justify-center transition-colors"
+            className="absolute top-0 bottom-0 bg-info-muted/40 hover:bg-info-muted/60 border-y border-info cursor-grab active:cursor-grabbing z-10 flex items-center justify-center transition-colors"
           >
-            <span className="text-[10px] font-medium text-base-content bg-base-100/80 px-1.5 py-0.5 rounded pointer-events-none num hidden sm:inline">
+            <span className="text-[10px] font-medium text-primary bg-surface/90 px-1.5 py-0.5 rounded pointer-events-none num hidden sm:inline border border-border">
               {clipDuration.toFixed(1)}s
             </span>
           </div>
@@ -220,9 +222,9 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
             }}
             style={{ left: `${startPercent}%` }}
             title="Drag Start Time"
-            className="absolute -ml-2 top-0 bottom-0 w-4 bg-primary rounded-md flex items-center justify-center cursor-ew-resize z-20 shadow"
+            className="absolute -ml-2 top-0 bottom-0 w-4 bg-accent-bg rounded-sm flex items-center justify-center cursor-ew-resize z-20 shadow-sm"
           >
-            <div className="w-[2px] h-3.5 bg-primary-content rounded-full" />
+            <div className="w-[2px] h-3.5 bg-on-accent rounded-full" />
           </div>
 
           {/* Right End Handle */}
@@ -233,90 +235,85 @@ export const TimeRangeSlider: React.FC<TimeRangeSliderProps> = ({
             }}
             style={{ left: `${endPercent}%` }}
             title="Drag End Time"
-            className="absolute -ml-2 top-0 bottom-0 w-4 bg-accent rounded-md flex items-center justify-center cursor-ew-resize z-20 shadow"
+            className="absolute -ml-2 top-0 bottom-0 w-4 bg-info rounded-sm flex items-center justify-center cursor-ew-resize z-20 shadow-sm"
           >
-            <div className="w-[2px] h-3.5 bg-accent-content rounded-full" />
+            <div className="w-[2px] h-3.5 bg-on-info rounded-full" />
           </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-base-content/70 font-medium">
+          <div className="flex items-center justify-between gap-2">
+            <Text size="sm" weight="medium" color="secondary">
               Start time
-            </span>
-            <div className="join">
-              <button
-                type="button"
-                onClick={() => onChangeRange(startTime - 1, endTime)}
-                className="btn btn-xs btn-outline join-item num"
-              >
-                -1s
-              </button>
+            </Text>
+            <HStack vAlign="center" gap={1}>
+              <ButtonGroup label="Adjust start time" size="sm">
+                <Button
+                  label="-1s"
+                  variant="secondary"
+                  onClick={() => onChangeRange(startTime - 1, endTime)}
+                  className="num"
+                />
+                <Button
+                  label="+1s"
+                  variant="secondary"
+                  onClick={() => onChangeRange(startTime + 1, endTime)}
+                  className="num"
+                />
+              </ButtonGroup>
               <input
                 type="text"
+                aria-label="Start time"
                 value={startInput}
                 onChange={(e) => setStartInput(e.target.value)}
-                onBlur={() => {
-                  const parsed = parseMmSsMs(startInput, startTime);
-                  onChangeRange(parsed, endTime);
-                }}
+                onBlur={() => onChangeRange(parseMmSsMs(startInput, startTime), endTime)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    const parsed = parseMmSsMs(startInput, startTime);
-                    onChangeRange(parsed, endTime);
+                    onChangeRange(parseMmSsMs(startInput, startTime), endTime);
                   }
                 }}
-                className="input input-xs join-item w-24 text-center num"
+                className="h-7 w-22 rounded-sm border border-border-strong bg-body px-2 text-center text-xs text-primary num focus:outline-none focus:border-info"
               />
-              <button
-                type="button"
-                onClick={() => onChangeRange(startTime + 1, endTime)}
-                className="btn btn-xs btn-outline join-item num"
-              >
-                +1s
-              </button>
-            </div>
+            </HStack>
           </div>
 
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-base-content/70 font-medium">
+          <div className="flex items-center justify-between gap-2">
+            <Text size="sm" weight="medium" color="secondary">
               End time
-            </span>
-            <div className="join">
-              <button
-                type="button"
-                onClick={() => onChangeRange(startTime, endTime - 1)}
-                className="btn btn-xs btn-outline join-item num"
-              >
-                -1s
-              </button>
+            </Text>
+            <HStack vAlign="center" gap={1}>
+              <ButtonGroup label="Adjust end time" size="sm">
+                <Button
+                  label="-1s"
+                  variant="secondary"
+                  onClick={() => onChangeRange(startTime, endTime - 1)}
+                  className="num"
+                />
+                <Button
+                  label="+1s"
+                  variant="secondary"
+                  onClick={() => onChangeRange(startTime, endTime + 1)}
+                  className="num"
+                />
+              </ButtonGroup>
               <input
                 type="text"
+                aria-label="End time"
                 value={endInput}
                 onChange={(e) => setEndInput(e.target.value)}
-                onBlur={() => {
-                  const parsed = parseMmSsMs(endInput, endTime);
-                  onChangeRange(startTime, parsed);
-                }}
+                onBlur={() => onChangeRange(startTime, parseMmSsMs(endInput, endTime))}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    const parsed = parseMmSsMs(endInput, endTime);
-                    onChangeRange(startTime, parsed);
+                    onChangeRange(startTime, parseMmSsMs(endInput, endTime));
                   }
                 }}
-                className="input input-xs join-item w-24 text-center num"
+                className="h-7 w-22 rounded-sm border border-border-strong bg-body px-2 text-center text-xs text-primary num focus:outline-none focus:border-info"
               />
-              <button
-                type="button"
-                onClick={() => onChangeRange(startTime, endTime + 1)}
-                className="btn btn-xs btn-outline join-item num"
-              >
-                +1s
-              </button>
-            </div>
+            </HStack>
           </div>
         </div>
       </div>
-    </div>
+      <Divider />
+    </VStack>
   );
 };

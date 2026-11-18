@@ -5,6 +5,27 @@ All notable changes to **VORTEX (CreatorVault)** will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-18
+
+### Added
+- **Astryx Design System UI Rewrite (`@astryxdesign/core` `0.7.16`)**:
+  - Replaced `daisyui` completely with Meta's Astryx Design System (`@astryxdesign/core`, `@astryxdesign/theme-neutral`, `@stylexjs/stylex`) bridged to Tailwind CSS v4 via `@astryxdesign/core/tailwind-theme.css` and explicit CSS `@layer` ordering.
+  - **True Obsidian Dark Mode & Light Mode**: Deep dark palette (`#09090b` canvas, `#101013` surfaces, `#111115` cards) and clean Light Mode synced with Electron `nativeTheme` and `titleBarOverlay`, with automatic migration for persisted legacy `antigravity-dark` / `antigravity-light` preferences.
+  - **Consistent `<Selector>` Dropdowns Across All Modules**: Replaced horizontal option pills with accessible `<Selector>` dropdowns across Download & Clip (`Split audio stems`), Video Quick Fixes (`Platform`, `Target FPS`, `Pre-Sharpen`, `Smoothing strength`, `Target file size cap`, `Silence threshold`, `Min pause duration`), Image Tools (`Color mode`, `Detail level`, `Edge softness`, `Upscale factor`), and Format Converter (sectioned `Target format`, `Sample rate`, `Video background style`).
+  - **Save Folder Picker on Every Module**: Added shared `OutputFolderButton` beside the primary action button in Video Quick Fixes, Image Tools, and Format Converter (matching Download & Clip).
+  - **Shared Drag-and-Drop Zone (`MediaDropzone`)**: Unified local media dropzone and staged asset list across Fixer, Vectorizer, and Converter modules.
+
+### Fixed
+- **Native OS Drag-and-Drop (`electron/main.ts`)**: Replaced corrupted `DRAG_ICON_DATA_URL` with a valid 32×32 PNG + programmatic `nativeImage.createFromBitmap()` fallback and `.native-drag-pill` pointer isolation (`pointer-events: none` on children) so dragging exported pills into Premiere Pro, After Effects, DaVinci Resolve, FL Studio, or Explorer works reliably.
+- **Settings Dialog & Sidebar Polish**: Fixed collapsed header/footer padding in `DiagnosticsPanel` (`<Dialog>`), widened sidebar rail (`w-64`) so `Settings` never truncates at 150% zoom, tightened `.astryx-tooltip` sizing (`11px`), and switched zoom percentage labels to regular `tabular-nums` font.
+- **Async Sidecar & Managed Python Venv (`electron/services/*`)**: Migrated hardware probing and media runner checks to non-blocking `execFileAsync`, added managed isolated Python venv support in `BinaryManager.ts`, and expanded `self-check.test.mjs` to 9 tests (verifying valid 32×32 PNG `DRAG_ICON_DATA_URL`).
+- **Vite Dev Scan Noise**: Scoped `optimizeDeps.entries` to `['index.html']` in `vite.config.ts` and ignored `website/` in `.gitignore`.
+
+### Changed
+- Bumped application version to `0.3.0` and rebuilt `release/win-unpacked/Vortex.exe`.
+
+---
+
 ## [0.2.0] - 2026-11-11
 
 ### Added

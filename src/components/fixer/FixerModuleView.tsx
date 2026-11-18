@@ -1,23 +1,35 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   Cpu,
   FileVideo,
   Film,
   Flame,
-  FolderPlus,
   Gauge,
-  Info,
   Play,
   Scissors,
   ShieldCheck,
   Sparkles,
-  Trash2,
-  UploadCloud,
   X
 } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Banner } from '@astryxdesign/core/Banner';
+import { Button } from '@astryxdesign/core/Button';
+import { Card } from '@astryxdesign/core/Card';
+import { ClickableCard } from '@astryxdesign/core/ClickableCard';
+import { Code } from '@astryxdesign/core/Code';
+import { Divider } from '@astryxdesign/core/Divider';
+import { Heading } from '@astryxdesign/core/Heading';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { InfoTip } from '@astryxdesign/core/InfoTip';
+import { HStack, VStack } from '@astryxdesign/core/Layout';
+import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
+import { Text } from '@astryxdesign/core/Text';
 import { useJobStore } from '../../store/useJobStore';
 import type { FixerPresetId } from '../../types/media';
 import { JobQueueList } from '../ripper/JobQueueList';
+import { MediaDropzone } from '../shared/MediaDropzone';
+import { OutputFolderButton } from '../shared/OutputFolderButton';
 
 const FIXER_PRESETS: Array<{
   id: FixerPresetId;
@@ -63,10 +75,44 @@ const FIXER_PRESETS: Array<{
   }
 ];
 
-const TARGET_SIZE_OPTIONS = [8, 10, 25, 50, 100];
-const DEFLICKER_WINDOW_OPTIONS = [5, 7, 11];
-const SILENCE_DB_OPTIONS = [-25, -30, -35, -40];
-const SILENCE_DUR_OPTIONS = [0.3, 0.5, 0.8];
+const PLATFORM_OPTIONS = [
+  { value: 'ig-reels', label: 'IG Reels' },
+  { value: 'tiktok', label: 'TikTok' },
+  { value: 'yt-shorts', label: 'YouTube Shorts' }
+];
+
+const FPS_OPTIONS = [
+  { value: 'keep', label: 'Source FPS' },
+  { value: '30', label: '30 fps' },
+  { value: '60', label: '60 fps' }
+];
+
+const SHARPEN_OPTIONS = [
+  { value: 'none', label: 'None' },
+  { value: 'subtle', label: 'Subtle' },
+  { value: 'crisp', label: 'Crisp' }
+];
+
+const DEFLICKER_WINDOW_OPTIONS = [
+  { value: '5', label: '5 frames (Light)' },
+  { value: '7', label: '7 frames (Balanced)' },
+  { value: '11', label: '11 frames (Strong)' }
+];
+
+const TARGET_SIZE_OPTIONS = [8, 10, 25, 50, 100].map((mb) => ({
+  value: String(mb),
+  label: `${mb} MB`
+}));
+
+const SILENCE_DB_OPTIONS = [-25, -30, -35, -40].map((db) => ({
+  value: String(db),
+  label: `${db} dB`
+}));
+
+const SILENCE_DUR_OPTIONS = [0.3, 0.5, 0.8].map((sec) => ({
+  value: String(sec),
+  label: `${sec}s`
+}));
 
 export const FixerModuleView: React.FC = () => {
   const stagedLocalVideos = useJobStore((s) => s.stagedLocalVideos);
@@ -107,8 +153,6 @@ export const FixerModuleView: React.FC = () => {
   const clearStagedLocalVideos = useJobStore((s) => s.clearStagedLocalVideos);
   const enqueueAndRunFixerJobs = useJobStore((s) => s.enqueueAndRunFixerJobs);
 
-  const [isDragOver, setIsDragOver] = useState(false);
-
   const hasNvenc = Boolean(diagnostics?.hardware.hasNvenc);
   const completedVideoPaths = jobs
     .filter(
@@ -119,22 +163,6 @@ export const FixerModuleView: React.FC = () => {
     )
     .map((j) => j.outputFilePath!);
 
-  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setIsDragOver(false);
-
-    const files = Array.from(e.dataTransfer.files);
-    const paths: string[] = [];
-    for (const file of files) {
-      const p = window.vortexApi?.getPathForDroppedFile?.(file);
-      if (p) paths.push(p);
-    }
-    if (paths.length > 0) {
-      await stageLocalVideoPaths(paths);
-    }
-  };
-
-  // Calculate preview bitrate for first staged video when Target Size Compressor is active
   const primaryVideo = stagedLocalVideos[0];
   const estimatedKbps = primaryVideo
     ? Math.max(
@@ -146,489 +174,310 @@ export const FixerModuleView: React.FC = () => {
     : null;
 
   return (
-    <div className="space-y-6">
+    <VStack gap={6}>
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <h2 className="text-base font-semibold text-base-content">
-            Video Quick Fixes & Reels Prep
-          </h2>
-          <span className="badge badge-xs badge-accent">Active</span>
-        </div>
+      <HStack vAlign="center" hAlign="between" gap={3} wrap="wrap">
+        <HStack vAlign="center" gap={2}>
+          <Heading level={3}>Video Quick Fixes & Reels Prep</Heading>
+          <Badge variant="info" label="Active" />
+        </HStack>
 
-        <div className="flex items-center gap-2">
+        <HStack vAlign="center" gap={2}>
           {completedVideoPaths.length > 0 && (
-            <button
-              type="button"
+            <Button
+              label="Use latest downloaded video"
+              variant="secondary"
+              size="sm"
+              tooltip="Stage the most recent video clip from the queue"
+              icon={<Sparkles className="w-3 h-3 text-info" />}
               onClick={() => stageLocalVideoPaths([completedVideoPaths[0]])}
-              className="btn btn-xs btn-ghost border border-base-300 gap-1.5"
-              title="Stage the most recent video clip from the queue"
-            >
-              <Sparkles className="w-3 h-3 text-accent" />
-              <span>Use latest downloaded video</span>
-            </button>
+            />
           )}
-          <span className="badge badge-xs badge-ghost num">
-            {hasNvenc ? 'NVIDIA NVENC ready' : 'CPU libx264 ready'}
-          </span>
-        </div>
-      </div>
+          <Badge
+            variant="neutral"
+            label={hasNvenc ? 'NVIDIA NVENC ready' : 'CPU libx264 ready'}
+          />
+        </HStack>
+      </HStack>
 
-      {/* Dropzone & File Browser */}
-      <div
-        onDragOver={(e) => {
-          e.preventDefault();
-          setIsDragOver(true);
-        }}
-        onDragLeave={() => setIsDragOver(false)}
-        onDrop={handleDrop}
-        className={`card bg-base-200 border border-dashed p-5 transition-colors ${
-          isDragOver ? 'border-accent bg-base-300/40' : 'border-base-300'
-        }`}
+      {/* Dropzone & Staged Local Videos */}
+      <MediaDropzone
+        title="Drop one or more videos here, or click Select videos"
+        subtitle="Pick a quick-fix tool below and drag the finished video right into your editing timeline."
+        buttonLabel="Select videos"
+        loadingLabel="Loading..."
+        isProbing={isProbing}
+        onBrowse={browseAndStageLocalVideos}
+        onDropPaths={stageLocalVideoPaths}
+        stagedCount={stagedLocalVideos.length}
+        stagedHeading="Selected videos"
+        onClearAll={clearStagedLocalVideos}
       >
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3.5">
-            <UploadCloud className="w-5 h-5 text-accent shrink-0" />
-            <div>
-              <p className="text-xs font-medium text-base-content">
-                Drop one or more videos here, or click Select videos
-              </p>
-              <p className="text-xs text-base-content/60 mt-0.5">
-                Pick a quick-fix tool below and drag the finished video right into your editing timeline.
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            disabled={isProbing}
-            onClick={browseAndStageLocalVideos}
-            className="btn btn-sm btn-primary gap-1.5 shrink-0"
+        {stagedLocalVideos.map((vid) => (
+          <div
+            key={vid.filePath}
+            className="px-3.5 py-2.5 flex items-center justify-between gap-3"
           >
-            {isProbing ? (
-              <span className="loading loading-spinner loading-xs" />
-            ) : (
-              <FolderPlus className="w-4 h-4" />
-            )}
-            <span>{isProbing ? 'Loading...' : 'Select videos'}</span>
-          </button>
-        </div>
-
-        {/* Staged Local Videos List */}
-        {stagedLocalVideos.length > 0 && (
-          <div className="mt-4 pt-4 border-t border-base-300 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-base-content/70">
-                Selected videos ({stagedLocalVideos.length})
-              </span>
-              <button
-                type="button"
-                onClick={clearStagedLocalVideos}
-                className="btn btn-ghost btn-xs text-base-content/60 hover:text-error gap-1"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>Clear all</span>
-              </button>
-            </div>
-
-            <div className="divide-y divide-base-300 border border-base-300 rounded-lg bg-base-100">
-              {stagedLocalVideos.map((vid) => (
-                <div
-                  key={vid.filePath}
-                  className="px-3.5 py-2.5 flex items-center justify-between gap-3"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <FileVideo className="w-4 h-4 text-accent shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-xs font-medium text-base-content truncate">
-                        {vid.fileName}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-base-content/60 num mt-0.5">
-                        <span>
-                          {vid.width}×{vid.height}
-                        </span>
-                        <span>·</span>
-                        <span>{vid.fps} fps</span>
-                        <span>·</span>
-                        <span>{vid.duration.toFixed(1)}s</span>
-                        <span>·</span>
-                        <span>{vid.fileSizeMB} MB</span>
-                        <span>·</span>
-                        <span className="uppercase">{vid.videoCodec}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => removeStagedLocalVideo(vid.filePath)}
-                    className="btn btn-ghost btn-xs btn-square text-base-content/50 hover:text-error shrink-0"
-                    title="Remove file"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <FileVideo className="w-4 h-4 text-info shrink-0" />
+              <div className="min-w-0">
+                <Text size="sm" weight="medium" color="primary" maxLines={1}>
+                  {vid.fileName}
+                </Text>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-secondary num mt-0.5">
+                  <span>
+                    {vid.width}×{vid.height}
+                  </span>
+                  <span>·</span>
+                  <span>{vid.fps} fps</span>
+                  <span>·</span>
+                  <span>{vid.duration.toFixed(1)}s</span>
+                  <span>·</span>
+                  <span>{vid.fileSizeMB} MB</span>
+                  <span>·</span>
+                  <span className="uppercase">{vid.videoCodec}</span>
                 </div>
-              ))}
+              </div>
             </div>
+
+            <IconButton
+              label={`Remove ${vid.fileName}`}
+              variant="ghost"
+              size="sm"
+              icon={<X className="w-3.5 h-3.5" />}
+              onClick={() => removeStagedLocalVideo(vid.filePath)}
+            />
           </div>
-        )}
-      </div>
+        ))}
+      </MediaDropzone>
 
-      {fixerError && (
-        <div role="alert" className="alert alert-error py-2 px-3 text-xs">
-          <span>{fixerError}</span>
-        </div>
-      )}
+      {fixerError && <Banner status="error" title={fixerError} role="alert" />}
 
-      {/* 4 Selectable Fixer Preset Cards */}
+      {/* 5 Selectable Fixer Preset Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        {FIXER_PRESETS.map((preset, idx) => {
+        {FIXER_PRESETS.map((preset) => {
           const Icon = preset.icon;
           const isSelected = selectedFixerPreset === preset.id;
-          // Left column opens tooltip upward so it never clips under the left sidebar rail
-          const tooltipDir = idx % 2 === 0 ? 'tooltip-top' : 'tooltip-left';
           return (
-            <div
+            <ClickableCard
               key={preset.id}
+              label={preset.title}
+              padding={3}
+              variant={isSelected ? 'default' : 'muted'}
               onClick={() => setSelectedFixerPreset(preset.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  setSelectedFixerPreset(preset.id);
-                }
-              }}
-              className={`card p-4 flex flex-row items-center justify-between gap-3 cursor-pointer transition-colors border ${
-                isSelected
-                  ? 'bg-base-300/70 border-base-content/40'
-                  : 'bg-base-200 border-base-300 hover:bg-base-200/80'
-              }`}
+              className={
+                isSelected ? 'ring-2 ring-info bg-surface' : 'border border-border'
+              }
             >
-              <div className="flex items-center gap-3 min-w-0">
-                <Icon
-                  className={`w-4 h-4 shrink-0 ${
-                    isSelected ? 'text-accent' : 'text-base-content/60'
-                  }`}
-                />
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-xs font-semibold text-base-content truncate">
-                      {preset.title}
-                    </h3>
-                    {isSelected && (
-                      <span className="badge badge-xs badge-primary">Selected</span>
-                    )}
-                  </div>
-                  <span className="text-xs text-base-content/50 block truncate mt-0.5 num">
-                    {preset.badge}
-                  </span>
-                </div>
-              </div>
+              <HStack vAlign="center" hAlign="between" gap={3}>
+                <HStack vAlign="center" gap={3} className="min-w-0 flex-1">
+                  <Icon
+                    className={`w-4 h-4 shrink-0 ${
+                      isSelected ? 'text-info' : 'text-secondary'
+                    }`}
+                  />
+                  <VStack gap={0.5} className="min-w-0 flex-1">
+                    <HStack vAlign="center" gap={2}>
+                      <Text size="sm" weight="semibold" color="primary" maxLines={1}>
+                        {preset.title}
+                      </Text>
+                      {isSelected && <Badge variant="info" label="Selected" />}
+                    </HStack>
+                    <Text size="sm" color="secondary" maxLines={1} className="num">
+                      {preset.badge}
+                    </Text>
+                  </VStack>
+                </HStack>
 
-              <div
-                className={`tooltip ${tooltipDir} shrink-0`}
-                data-tip={preset.desc}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  type="button"
-                  aria-label={`Details for ${preset.title}`}
-                  className="btn btn-ghost btn-xs btn-circle text-base-content/60 hover:text-base-content"
-                >
-                  <Info className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
+                <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+                  <InfoTip
+                    label={`Details for ${preset.title}`}
+                    size="xsm"
+                    content={preset.desc}
+                  />
+                </div>
+              </HStack>
+            </ClickableCard>
           );
         })}
       </div>
 
       {/* Preset Parameter Controls & Execute Bar */}
-      <div className="card bg-base-200 border border-base-300 p-4 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          {/* Dynamic Controls per Selected Preset */}
+      <Card padding={4} className="bg-surface">
+        <VStack gap={4}>
           {selectedFixerPreset === 'reel-optimizer' && (
-            <div className="flex flex-wrap items-center gap-4">
-              {/* Target Platform */}
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Platform
-                </span>
-                <div className="join">
-                  {(
-                    [
-                      { id: 'ig-reels', label: 'IG Reels' },
-                      { id: 'tiktok', label: 'TikTok' },
-                      { id: 'yt-shorts', label: 'Shorts' }
-                    ] as const
-                  ).map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => setReelPlatform(p.id)}
-                      className={`btn btn-xs join-item num ${
-                        reelPlatform === p.id ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
+            <VStack gap={3}>
+              <div className="flex flex-wrap items-end gap-3">
+                <Selector
+                  label="Platform"
+                  size="sm"
+                  width={150}
+                  value={reelPlatform}
+                  onChange={(val) =>
+                    setReelPlatform(val as 'ig-reels' | 'tiktok' | 'yt-shorts')
+                  }
+                  options={PLATFORM_OPTIONS}
+                />
+
+                <Selector
+                  label="Target FPS"
+                  size="sm"
+                  width={135}
+                  value={reelTargetFps}
+                  onChange={(val) => setReelTargetFps(val as 'keep' | '30' | '60')}
+                  options={FPS_OPTIONS}
+                />
+
+                <Selector
+                  label="Pre-Sharpen"
+                  size="sm"
+                  width={130}
+                  value={reelPreSharpen}
+                  onChange={(val) =>
+                    setReelPreSharpen(val as 'none' | 'subtle' | 'crisp')
+                  }
+                  options={SHARPEN_OPTIONS}
+                />
               </div>
 
-              {/* Target FPS */}
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Target FPS
-                </span>
-                <div className="join">
-                  {(
-                    [
-                      { id: 'keep', label: 'Source' },
-                      { id: '30', label: '30' },
-                      { id: '60', label: '60' }
-                    ] as const
-                  ).map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      onClick={() => setReelTargetFps(f.id)}
-                      className={`btn btn-xs join-item num ${
-                        reelTargetFps === f.id ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {f.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Pre-Sharpen */}
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Pre-Sharpen
-                </span>
-                <div className="join">
-                  {(
-                    [
-                      { id: 'none', label: 'None' },
-                      { id: 'subtle', label: 'Subtle' },
-                      { id: 'crisp', label: 'Crisp' }
-                    ] as const
-                  ).map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => setReelPreSharpen(s.id)}
-                      className={`btn btn-xs join-item num ${
-                        reelPreSharpen === s.id ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Sleek Toggles */}
-              <div className="flex flex-wrap items-center gap-3 pt-1 sm:pt-0">
-                <label className="label cursor-pointer gap-2 py-0" title="Reduces high-frequency noise that causes macroblocking under platform compression">
-                  <span className="text-xs text-base-content/80">Grain Saver</span>
-                  <input
-                    type="checkbox"
-                    checked={reelDenoiseGrain}
-                    onChange={(e) => setReelDenoiseGrain(e.target.checked)}
-                    className="toggle toggle-xs toggle-primary"
-                  />
-                </label>
-
-                <label className="label cursor-pointer gap-2 py-0" title="Tags bt709 primaries and TV range to prevent washed-out colors on mobile. For SDR sources only; HDR/HLG footage needs tone-mapping in your NLE.">
-                  <span className="text-xs text-base-content/80">Rec.709 Lock</span>
-                  <input
-                    type="checkbox"
-                    checked={reelColorFixRec709}
-                    onChange={(e) => setReelColorFixRec709(e.target.checked)}
-                    className="toggle toggle-xs toggle-primary"
-                  />
-                </label>
-
-                <label className="label cursor-pointer gap-2 py-0" title="Simulates constrained 3.5Mbps platform re-compression and calculates VMAF retention lift">
-                  <span className="text-xs text-base-content/80">IG Simulation</span>
-                  <input
-                    type="checkbox"
-                    checked={reelSimulateIgCompression}
-                    onChange={(e) => setReelSimulateIgCompression(e.target.checked)}
-                    className="toggle toggle-xs toggle-primary"
-                  />
-                </label>
-              </div>
-            </div>
+              <HStack vAlign="center" gap={4} wrap="wrap">
+                <Switch
+                  label="Grain Saver"
+                  labelTooltip="Reduces high-frequency noise that causes macroblocking under platform compression"
+                  size="sm"
+                  value={reelDenoiseGrain}
+                  onChange={(checked) => setReelDenoiseGrain(checked)}
+                />
+                <Switch
+                  label="Rec.709 Lock"
+                  labelTooltip="Tags bt709 primaries and TV range to prevent washed-out colors on mobile. For SDR sources only."
+                  size="sm"
+                  value={reelColorFixRec709}
+                  onChange={(checked) => setReelColorFixRec709(checked)}
+                />
+                <Switch
+                  label="IG Simulation"
+                  labelTooltip="Simulates constrained 3.5Mbps platform re-compression and calculates VMAF retention lift"
+                  size="sm"
+                  value={reelSimulateIgCompression}
+                  onChange={(checked) => setReelSimulateIgCompression(checked)}
+                />
+              </HStack>
+            </VStack>
           )}
 
           {selectedFixerPreset === 'deflicker' && (
-            <div className="flex flex-wrap items-center gap-4">
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Smoothing strength
-                </span>
-                <div className="join">
-                  {DEFLICKER_WINDOW_OPTIONS.map((w) => (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => setDeflickerWindow(w)}
-                      className={`btn btn-xs join-item num ${
-                        deflickerWindow === w ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {w}f
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <Selector
+              label="Smoothing strength"
+              size="sm"
+              width={200}
+              value={String(deflickerWindow)}
+              onChange={(val) => setDeflickerWindow(Number(val))}
+              options={DEFLICKER_WINDOW_OPTIONS}
+            />
           )}
 
           {selectedFixerPreset === 'target-size' && (
-            <div className="flex flex-wrap items-center gap-4">
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Target file size cap
-                </span>
-                <div className="join">
-                  {TARGET_SIZE_OPTIONS.map((mb) => (
-                    <button
-                      key={mb}
-                      type="button"
-                      onClick={() => setTargetSizeMB(mb)}
-                      className={`btn btn-xs join-item num ${
-                        targetSizeMB === mb ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {mb} MB
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <HStack vAlign="end" gap={4} wrap="wrap">
+              <Selector
+                label="Target file size cap"
+                size="sm"
+                width={150}
+                value={String(targetSizeMB)}
+                onChange={(val) => setTargetSizeMB(Number(val))}
+                options={TARGET_SIZE_OPTIONS}
+              />
 
               {estimatedKbps !== null && (
-                <div className="space-y-1">
-                  <span className="text-xs font-medium text-base-content/70 block">
+                <VStack gap={1}>
+                  <Text size="sm" weight="medium" color="secondary">
                     Target quality
-                  </span>
-                  <span className="badge badge-sm badge-neutral num">
-                    {estimatedKbps} kbps + 128k AAC
-                  </span>
-                </div>
+                  </Text>
+                  <Badge variant="neutral" label={`${estimatedKbps} kbps + 128k AAC`} />
+                </VStack>
               )}
-            </div>
+            </HStack>
           )}
 
           {selectedFixerPreset === 'silence-xml' && (
-            <div className="flex flex-wrap items-center gap-4">
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Silence threshold
-                </span>
-                <div className="join">
-                  {SILENCE_DB_OPTIONS.map((db) => (
-                    <button
-                      key={db}
-                      type="button"
-                      onClick={() => setSilenceThresholdDb(db)}
-                      className={`btn btn-xs join-item num ${
-                        silenceThresholdDb === db ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {db} dB
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <HStack vAlign="end" gap={3} wrap="wrap">
+              <Selector
+                label="Silence threshold"
+                size="sm"
+                width={150}
+                value={String(silenceThresholdDb)}
+                onChange={(val) => setSilenceThresholdDb(Number(val))}
+                options={SILENCE_DB_OPTIONS}
+              />
 
-              <div className="space-y-1">
-                <span className="text-xs font-medium text-base-content/70 block">
-                  Min pause duration
-                </span>
-                <div className="join">
-                  {SILENCE_DUR_OPTIONS.map((sec) => (
-                    <button
-                      key={sec}
-                      type="button"
-                      onClick={() => setSilenceMinDuration(sec)}
-                      className={`btn btn-xs join-item num ${
-                        silenceMinDuration === sec ? 'btn-primary' : 'btn-outline'
-                      }`}
-                    >
-                      {sec}s
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+              <Selector
+                label="Min pause duration"
+                size="sm"
+                width={150}
+                value={String(silenceMinDuration)}
+                onChange={(val) => setSilenceMinDuration(Number(val))}
+                options={SILENCE_DUR_OPTIONS}
+              />
+            </HStack>
           )}
 
           {selectedFixerPreset === 'prores-proxy' && (
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-base-content">
-                1080p Apple ProRes 422 Proxy (<code className="num">prores_ks -profile:v 0</code>)
-              </span>
-              <p className="text-xs text-base-content/60">
-                Outputs constant-frame-rate <code className="num">yuv422p10le .mov</code> with uncompressed 48kHz 16-bit PCM stereo audio.
-              </p>
-            </div>
+            <VStack gap={0.5}>
+              <Text size="sm" weight="medium" color="primary">
+                1080p Apple ProRes 422 Proxy (<Code size="inherit">prores_ks -profile:v 0</Code>)
+              </Text>
+              <Text type="supporting" size="sm" color="secondary">
+                Outputs constant-frame-rate <Code size="inherit">yuv422p10le .mov</Code> with
+                uncompressed 48kHz 16-bit PCM stereo audio.
+              </Text>
+            </VStack>
           )}
 
-          {/* Right side: Hardware Encoder toggle + Execute CTA */}
-          <div className="flex items-center gap-3 shrink-0">
-            {selectedFixerPreset !== 'prores-proxy' && (
-              <label
-                className="label cursor-pointer gap-2 py-0"
-                title={
-                  selectedFixerPreset === 'reel-optimizer'
-                    ? useHardwareEncoder
-                      ? 'NVENC GPU active. Turn off for maximum quality tuned libx264 CPU encode.'
-                      : 'Maximum quality tuned libx264 CPU encode active. Turn on for faster NVENC GPU encode.'
-                    : undefined
-                }
-              >
-                <Cpu className="w-3.5 h-3.5 text-base-content/70" />
-                <span className="text-xs text-base-content/80">
-                  {hasNvenc ? 'NVENC GPU' : 'Hardware'}
-                </span>
-                <input
-                  type="checkbox"
-                  checked={useHardwareEncoder}
-                  onChange={(e) => setUseHardwareEncoder(e.target.checked)}
-                  className="toggle toggle-xs toggle-primary"
-                />
-              </label>
-            )}
+          <Divider />
 
-            <button
-              type="button"
-              disabled={stagedLocalVideos.length === 0 || isFixingBatch}
-              onClick={enqueueAndRunFixerJobs}
-              className="btn btn-sm btn-primary gap-1.5"
-            >
-              {isFixingBatch ? (
-                <span className="loading loading-spinner loading-xs" />
-              ) : (
-                <Play className="w-3.5 h-3.5" />
+          {/* Save Folder, Hardware Encoder Toggle & Execute CTA */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              {selectedFixerPreset !== 'prores-proxy' && (
+                <Switch
+                  label={hasNvenc ? 'NVENC GPU' : 'Hardware'}
+                  labelIcon={<Cpu className="w-3.5 h-3.5 text-secondary" />}
+                  labelTooltip={
+                    selectedFixerPreset === 'reel-optimizer'
+                      ? useHardwareEncoder
+                        ? 'NVENC GPU active. Turn off for maximum quality tuned libx264 CPU encode.'
+                        : 'Maximum quality tuned libx264 CPU encode active. Turn on for faster NVENC GPU encode.'
+                      : undefined
+                  }
+                  size="sm"
+                  value={useHardwareEncoder}
+                  onChange={(checked) => setUseHardwareEncoder(checked)}
+                />
               )}
-              <span>
-                {isFixingBatch
-                  ? 'Processing Batch...'
-                  : `Fix Video${stagedLocalVideos.length > 0 ? ` (${stagedLocalVideos.length})` : ''}`}
-              </span>
-            </button>
+            </div>
+
+            <HStack vAlign="center" gap={2}>
+              <OutputFolderButton />
+              <Button
+                label={
+                  isFixingBatch
+                    ? 'Processing Batch...'
+                    : `Fix Video${stagedLocalVideos.length > 0 ? ` (${stagedLocalVideos.length})` : ''}`
+                }
+                variant="primary"
+                size="sm"
+                isLoading={isFixingBatch}
+                isDisabled={stagedLocalVideos.length === 0 || isFixingBatch}
+                icon={<Play className="w-3.5 h-3.5" />}
+                onClick={enqueueAndRunFixerJobs}
+              />
+            </HStack>
           </div>
-        </div>
-      </div>
+        </VStack>
+      </Card>
 
       {/* Shared Queue & Native OS Drag-to-Timeline Pills */}
       <JobQueueList />
-    </div>
+    </VStack>
   );
 };

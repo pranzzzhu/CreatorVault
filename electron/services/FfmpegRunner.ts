@@ -1,7 +1,8 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import type {
   ConverterJobConfig,
@@ -17,6 +18,8 @@ import type {
 import { killProcessTree } from './BinaryManager';
 import { getNonCollidingFilePath, releaseFilePath } from './FileUtils';
 
+const execFileAsync = promisify(execFile);
+
 // Even scaled size and even pad offsets keep YUV420p chroma planes aligned (offset = trunc(x/4)*2).
 const REEL_SCALE_PAD_FILTER =
   "scale=w='trunc(min(1080,iw*1920/ih)/2)*2':h='trunc(min(1920,ih*1080/iw)/2)*2':flags=lanczos," +
@@ -28,19 +31,28 @@ export class FfmpegRunner {
   private encoderCache = new Map<string, boolean>();
   private filterCache = new Map<string, boolean>();
 
+  private markCancelled(jobId: string): void {
+    if (this.cancelledJobs.size > 200) {
+      const oldest = this.cancelledJobs.values().next().value;
+      if (oldest) this.cancelledJobs.delete(oldest);
+    }
+    this.cancelledJobs.add(jobId);
+    const timer = setTimeout(() => this.cancelledJobs.delete(jobId), 60_000);
+    timer.unref?.();
+  }
+
   constructor(private getFfmpegPath: () => string, private isAvailable: () => boolean) {}
 
-  private hasEncoder(encoderName: string): boolean {
+  private async hasEncoder(encoderName: string): Promise<boolean> {
     if (this.encoderCache.has(encoderName)) {
       return this.encoderCache.get(encoderName)!;
     }
     try {
-      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-encoders'], {
+      const { stdout } = await execFileAsync(this.getFfmpegPath(), ['-hide_banner', '-encoders'], {
         windowsHide: true,
-        encoding: 'utf8',
         timeout: 5000
       });
-      const available = res.status === 0 && Boolean(res.stdout && res.stdout.includes(encoderName));
+      const available = Boolean(stdout && stdout.includes(encoderName));
       this.encoderCache.set(encoderName, available);
       return available;
     } catch {
@@ -49,30 +61,32 @@ export class FfmpegRunner {
   }
 
   /** Returns true when the file has at least one audio stream (ffmpeg -i lists streams on stderr). */
-  private hasAudioStream(filePath: string): boolean {
+  private async hasAudioStream(filePath: string): Promise<boolean> {
     try {
-      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-i', filePath], {
+      const { stderr } = await execFileAsync(this.getFfmpegPath(), ['-hide_banner', '-i', filePath], {
         windowsHide: true,
-        encoding: 'utf8',
         timeout: 10000
       });
-      return /Stream #\d+:\d+.*: Audio:/.test(`${res.stderr || ''}`);
-    } catch {
+      return /Stream #\d+:\d+.*: Audio:/.test(`${stderr || ''}`);
+    } catch (err: any) {
+      // ffmpeg exits with code 1 when only -i is provided without output, but stderr still has streams
+      if (err?.stderr && /Stream #\d+:\d+.*: Audio:/.test(`${err.stderr}`)) {
+        return true;
+      }
       return true;
     }
   }
 
-  private hasFilter(filterName: string): boolean {
+  private async hasFilter(filterName: string): Promise<boolean> {
     if (this.filterCache.has(filterName)) {
       return this.filterCache.get(filterName)!;
     }
     try {
-      const res = spawnSync(this.getFfmpegPath(), ['-hide_banner', '-filters'], {
+      const { stdout } = await execFileAsync(this.getFfmpegPath(), ['-hide_banner', '-filters'], {
         windowsHide: true,
-        encoding: 'utf8',
         timeout: 5000
       });
-      const available = res.status === 0 && Boolean(res.stdout && res.stdout.includes(filterName));
+      const available = Boolean(stdout && stdout.includes(filterName));
       this.filterCache.set(filterName, available);
       return available;
     } catch {
@@ -249,7 +263,7 @@ export class FfmpegRunner {
   }
 
   public cancelJob(jobId: string): boolean {
-    this.cancelledJobs.add(jobId);
+    this.markCancelled(jobId);
     const proc = this.activeProcesses.get(jobId);
     if (proc) {
       killProcessTree(proc);
@@ -261,7 +275,7 @@ export class FfmpegRunner {
 
   public cancelAll(): void {
     for (const [jobId, proc] of this.activeProcesses.entries()) {
-      this.cancelledJobs.add(jobId);
+      this.markCancelled(jobId);
       killProcessTree(proc);
     }
     this.activeProcesses.clear();
@@ -273,12 +287,12 @@ export class FfmpegRunner {
   /**
    * @deprecated Use probeLocalMedia instead. Kept for backwards compatibility with Module 2.
    */
-  public probeLocalVideo(
+  public async probeLocalVideo(
     filePath: string,
     ffprobePath: string,
     isFfprobeAvailable: boolean
-  ): LocalVideoMetadata {
-    const meta = this.probeLocalMedia(filePath, ffprobePath, isFfprobeAvailable);
+  ): Promise<LocalVideoMetadata> {
+    const meta = await this.probeLocalMedia(filePath, ffprobePath, isFfprobeAvailable);
     return {
       filePath: meta.filePath,
       fileName: meta.fileName,
@@ -296,11 +310,11 @@ export class FfmpegRunner {
    * Probes any local video or audio file via ffprobe, automatically classifying it as 'video' or 'audio'
    * (ignoring embedded album art streams on MP3/FLAC files).
    */
-  public probeLocalMedia(
+  public async probeLocalMedia(
     filePath: string,
     ffprobePath: string,
     isFfprobeAvailable: boolean
-  ): LocalMediaMetadata {
+  ): Promise<LocalMediaMetadata> {
     if (!fs.existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
     }
@@ -322,7 +336,7 @@ export class FfmpegRunner {
 
     if (isFfprobeAvailable) {
       try {
-        const res = spawnSync(
+        const { stdout } = await execFileAsync(
           ffprobePath,
           [
             '-v',
@@ -333,11 +347,11 @@ export class FfmpegRunner {
             '-show_streams',
             filePath
           ],
-          { encoding: 'utf8', windowsHide: true, timeout: 8000 }
+          { windowsHide: true, timeout: 8000 }
         );
 
-        if (res.status === 0 && res.stdout) {
-          const parsed = JSON.parse(res.stdout);
+        if (stdout) {
+          const parsed = JSON.parse(stdout);
           const fmtDur = parseFloat(parsed.format?.duration || '0');
           if (Number.isFinite(fmtDur) && fmtDur > 0) {
             duration = Number(fmtDur.toFixed(2));
@@ -439,7 +453,7 @@ export class FfmpegRunner {
     const outPath = getNonCollidingFilePath(config.outputDir, `${baseName}_Converted`, targetExt);
     try {
     const safeDur = Math.max(1, config.duration || 15);
-    const useNvenc = Boolean(hasNvenc && config.useHardwareEncoder && this.hasEncoder('h264_nvenc'));
+    const useNvenc = Boolean(hasNvenc && config.useHardwareEncoder && (await this.hasEncoder('h264_nvenc')));
 
     const targetIsAudio = ['wav', 'mp3', 'flac', 'm4a', 'ogg'].includes(targetExt);
     const sourceIsAudio = config.mediaType === 'audio';
@@ -948,7 +962,7 @@ export class FfmpegRunner {
       directOutPath = outPath;
       const hasAudio = config.audioCodec !== undefined
         ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
-        : this.hasAudioStream(config.inputPath);
+        : (await this.hasAudioStream(config.inputPath));
       const audioKbps = hasAudio ? 128 : 0;
       // Reserve 6% container overhead margin so output strictly stays under the cap
       const totalTargetKbits = targetMB * 8192 * 0.94;
@@ -1185,7 +1199,7 @@ export class FfmpegRunner {
             : (config.fps || 30);
       const keyint = Math.max(24, Math.round(targetFpsNum * 2));
       const threadCount = Math.max(1, Math.min(os.cpus().length - 2, 8));
-      const hasX264 = this.hasEncoder('libx264');
+      const hasX264 = await this.hasEncoder('libx264');
 
       const vEncoderArgs = useNvenc
         ? [
@@ -1263,7 +1277,7 @@ export class FfmpegRunner {
       // 4. Loudness normalization; skipped for silent inputs (no audio stream) and clips under 3s
       const hasAudio = config.audioCodec !== undefined
         ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
-        : this.hasAudioStream(config.inputPath);
+        : (await this.hasAudioStream(config.inputPath));
       const audioArgs = !hasAudio
         ? ['-an']
         : safeDur >= 3
@@ -1378,7 +1392,7 @@ export class FfmpegRunner {
     // Preset: 'silence-xml' (Dead-Air Silence Chopper -> Premiere Pro FCP7 XML + Jump-Cut Preview MP4: 2 output files)
     const hasAudio = config.audioCodec !== undefined
       ? (Boolean(config.audioCodec) && config.audioCodec.toLowerCase() !== 'none')
-      : this.hasAudioStream(config.inputPath);
+      : (await this.hasAudioStream(config.inputPath));
     if (!hasAudio) {
       throw new Error('Video contains no audio track for silence detection.');
     }
@@ -1412,12 +1426,16 @@ export class FfmpegRunner {
       }
     ];
 
-    // Also render a ready-to-play jump-cut MP4 if speech segments were isolated (isolated in try/catch per MJ-4)
-    if (segments.length > 0 && segments.length <= 75) {
+    // Also render a ready-to-play jump-cut MP4 if speech segments were isolated (supports up to 400 cuts via filter script)
+    if (segments.length > 0 && segments.length <= 400) {
+      const filterScriptPath = path.join(os.tmpdir(), `vortex_jumpcut_${jobId}.txt`);
       try {
         const expr = segments
           .map((s) => `between(t,${s.start.toFixed(3)},${s.end.toFixed(3)})`)
           .join('+');
+        const filterContent = `[0:v]select='${expr}',setpts=N/FRAME_RATE/TB[outv];[0:a]aselect='${expr}',asetpts=N/SR/TB[outa]`;
+        fs.writeFileSync(filterScriptPath, filterContent, 'utf8');
+
         const vEncoderArgs = useNvenc
           ? ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '20']
           : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20'];
@@ -1428,10 +1446,12 @@ export class FfmpegRunner {
             '-y',
             '-i',
             config.inputPath,
-            '-vf',
-            `select='${expr}',setpts=N/FRAME_RATE/TB`,
-            '-af',
-            `aselect='${expr}',asetpts=N/SR/TB`,
+            '-filter_complex_script',
+            filterScriptPath,
+            '-map',
+            '[outv]',
+            '-map',
+            '[outa]',
             ...vEncoderArgs,
             '-pix_fmt',
             'yuv420p',
@@ -1461,7 +1481,13 @@ export class FfmpegRunner {
         if ((err as Error).message?.toLowerCase().includes('cancelled by user')) {
           throw err;
         }
-        // Keep primary Premiere XML deliverable even if jump-cut preview fails
+        // Jump-cut render failed non-fatally; XML remains valid and usable
+      } finally {
+        try {
+          if (fs.existsSync(filterScriptPath)) fs.unlinkSync(filterScriptPath);
+        } catch {
+          // Ignore unlink errors in temp directory
+        }
       }
     }
 
@@ -1469,12 +1495,12 @@ export class FfmpegRunner {
       outputFilePath: xmlPath,
       pills
     };
-    } finally {
-      if (directOutPath) {
-        releaseFilePath(directOutPath);
-      }
+  } finally {
+    if (directOutPath) {
+      releaseFilePath(directOutPath);
     }
   }
+}
 
   private runFfmpegWithProgress(
     jobId: string,
@@ -1571,11 +1597,14 @@ export class FfmpegRunner {
       this.activeProcesses.set(jobId, proc);
       proc.stdout?.resume();
 
-      let fullLog = '';
+      const silences: Array<{ start: number; end: number }> = [];
+      let currentStart: number | null = null;
+      let lineRemainder = '';
+      let stderrTail = '';
 
       proc.stderr.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
-        fullLog += text;
+        stderrTail = (stderrTail + text).slice(-4096);
         const timeMatch = text.match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/);
         if (timeMatch && durationSec > 0) {
           const secs =
@@ -1589,6 +1618,23 @@ export class FfmpegRunner {
             progress: pct,
             statusMessage: `Scanning audio for dead air (${thresholdDb}dB, ${minSilenceDur}s)...`
           });
+        }
+
+        const lines = (lineRemainder + text).split(/\r?\n/);
+        lineRemainder = lines.pop() || '';
+        for (const line of lines) {
+          const startMatch = line.match(/silence_start:\s*([0-9.]+)/);
+          if (startMatch) {
+            currentStart = parseFloat(startMatch[1]);
+          }
+          const endMatch = line.match(/silence_end:\s*([0-9.]+)/);
+          if (endMatch && currentStart !== null) {
+            const endVal = parseFloat(endMatch[1]);
+            if (endVal > currentStart) {
+              silences.push({ start: currentStart, end: endVal });
+            }
+            currentStart = null;
+          }
         }
       });
 
@@ -1610,19 +1656,15 @@ export class FfmpegRunner {
           return;
         }
         if (code !== 0) {
-          reject(new Error(`Silence scan exited with code ${code}`));
+          const lastErr = stderrTail.trim().split(/\r?\n/).pop() || `Silence scan exited with code ${code}`;
+          reject(new Error(lastErr));
           return;
         }
 
-        const silences: Array<{ start: number; end: number }> = [];
-        let currentStart: number | null = null;
-
-        for (const line of fullLog.split(/\r?\n/)) {
-          const startMatch = line.match(/silence_start:\s*([0-9.]+)/);
-          if (startMatch) {
-            currentStart = parseFloat(startMatch[1]);
-          }
-          const endMatch = line.match(/silence_end:\s*([0-9.]+)/);
+        if (lineRemainder) {
+          const startMatch = lineRemainder.match(/silence_start:\s*([0-9.]+)/);
+          if (startMatch) currentStart = parseFloat(startMatch[1]);
+          const endMatch = lineRemainder.match(/silence_end:\s*([0-9.]+)/);
           if (endMatch && currentStart !== null) {
             const endVal = parseFloat(endMatch[1]);
             if (endVal > currentStart) {
@@ -1631,6 +1673,7 @@ export class FfmpegRunner {
             currentStart = null;
           }
         }
+
         if (currentStart !== null && currentStart < durationSec) {
           silences.push({ start: currentStart, end: durationSec });
         }
@@ -1677,9 +1720,10 @@ export class FfmpegRunner {
       Math.abs(rawFps - 59.94) < 0.08;
     const ntscFlag = isNtsc ? 'TRUE' : 'FALSE';
     const fps = Math.max(1, Math.round(rawFps));
+    const exactFps = isNtsc ? fps * (1000 / 1001) : rawFps;
     const width = config.width || 1920;
     const height = config.height || 1080;
-    const totalSourceFrames = Math.max(1, Math.round(config.duration * fps));
+    const totalSourceFrames = Math.max(1, Math.round(config.duration * exactFps));
     // Premiere Pro / FCP7 XML expects file://localhost/D%3a/... on Windows (MJ-3)
     const rawFileUrl = pathToFileURL(config.inputPath).toString();
     const fileUrl =
@@ -1698,8 +1742,8 @@ export class FfmpegRunner {
     const audioClipItems: string[] = [];
 
     segments.forEach((seg, idx) => {
-      const inFrame = Math.max(0, Math.round(seg.start * fps));
-      const outFrame = Math.max(inFrame + 1, Math.round(seg.end * fps));
+      const inFrame = Math.max(0, Math.round(seg.start * exactFps));
+      const outFrame = Math.max(inFrame + 1, Math.round(seg.end * exactFps));
       const clipDurFrames = outFrame - inFrame;
       const startTimeline = timelineCursor;
       const endTimeline = timelineCursor + clipDurFrames;
@@ -1865,7 +1909,7 @@ export class FfmpegRunner {
 
     const simPreviewPath = path.join(jobFolder, `${baseName}_IG_Simulated_Preview.mp4`);
     const rawSimPath = path.join(jobFolder, `${baseName}_temp_raw_sim.mp4`);
-    const simEncoder = this.hasEncoder('libx264') ? 'libx264' : 'h264';
+    const simEncoder = (await this.hasEncoder('libx264')) ? 'libx264' : 'h264';
     const constrainedArgs = [
       '-c:v',
       simEncoder,
@@ -1979,8 +2023,8 @@ export class FfmpegRunner {
     sliceDur: number,
     refFilter?: string
   ): Promise<number | null> {
-    const hasVmaf = this.hasFilter('libvmaf');
-    const hasSsim = this.hasFilter('ssim');
+    const hasVmaf = await this.hasFilter('libvmaf');
+    const hasSsim = await this.hasFilter('ssim');
 
     // Attempt 1: libvmaf
     if (hasVmaf) {

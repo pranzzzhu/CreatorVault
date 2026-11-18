@@ -1,7 +1,8 @@
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type {
   JobProgressEvent,
   LocalImageMetadata,
@@ -11,9 +12,21 @@ import type {
 import { killProcessTree } from './BinaryManager';
 import { getNonCollidingFilePath, releaseFilePath } from './FileUtils';
 
+const execFileAsync = promisify(execFile);
+
 export class VectorRunner {
   private activeProcesses = new Map<string, ChildProcess>();
   private cancelledJobs = new Set<string>();
+
+  private markCancelled(jobId: string): void {
+    if (this.cancelledJobs.size > 200) {
+      const oldest = this.cancelledJobs.values().next().value;
+      if (oldest) this.cancelledJobs.delete(oldest);
+    }
+    this.cancelledJobs.add(jobId);
+    const timer = setTimeout(() => this.cancelledJobs.delete(jobId), 60_000);
+    timer.unref?.();
+  }
 
   constructor(
     private binDir: string,
@@ -23,7 +36,54 @@ export class VectorRunner {
     private getPythonPath: () => string = () => 'python'
   ) {}
 
-  private findOptionalBinary(binaryName: string): string | null {
+  private async spawnBufferAsync(
+    binPath: string,
+    args: string[],
+    maxBytes: number,
+    timeoutMs: number
+  ): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(binPath, args, { windowsHide: true });
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let killed = false;
+
+      const timer = setTimeout(() => {
+        killed = true;
+        killProcessTree(proc);
+        reject(new Error(`Command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      proc.stdout.on('data', (d: Buffer) => {
+        total += d.length;
+        if (total > maxBytes) {
+          killed = true;
+          clearTimeout(timer);
+          killProcessTree(proc);
+          reject(new Error(`Output exceeded maximum buffer size (${maxBytes} bytes)`));
+          return;
+        }
+        chunks.push(d);
+      });
+
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        if (!killed) reject(err);
+      });
+
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (killed) return;
+        if (code === 0) {
+          resolve(Buffer.concat(chunks));
+        } else {
+          reject(new Error(`Process exited with code ${code}`));
+        }
+      });
+    });
+  }
+
+  private async findOptionalBinary(binaryName: string): Promise<string | null> {
     const isWin = process.platform === 'win32';
     const exeName = isWin ? `${binaryName}.exe` : binaryName;
     const localCandidate = path.join(this.binDir, exeName);
@@ -33,12 +93,11 @@ export class VectorRunner {
 
     try {
       const locateCmd = isWin ? 'where' : 'which';
-      const output = execFileSync(locateCmd, [binaryName], {
-        encoding: 'utf8',
+      const { stdout } = await execFileAsync(locateCmd, [binaryName], {
         timeout: 2500,
         windowsHide: true
       });
-      const first = output
+      const first = stdout
         .split(/\r?\n/)
         .map((l) => l.trim())
         .find((l) => l.length > 0);
@@ -51,7 +110,7 @@ export class VectorRunner {
     return null;
   }
 
-  public probeLocalImage(filePath: string): LocalImageMetadata {
+  public async probeLocalImage(filePath: string): Promise<LocalImageMetadata> {
     if (!fs.existsSync(filePath)) {
       throw new Error(`Image file not found: ${filePath}`);
     }
@@ -66,7 +125,7 @@ export class VectorRunner {
 
     if (this.isFfprobeAvailable()) {
       try {
-        const res = spawnSync(
+        const { stdout } = await execFileAsync(
           this.getFfprobePath(),
           [
             '-v',
@@ -76,10 +135,10 @@ export class VectorRunner {
             '-show_streams',
             filePath
           ],
-          { encoding: 'utf8', windowsHide: true, timeout: 6000 }
+          { windowsHide: true, timeout: 6000 }
         );
-        if (res.status === 0 && res.stdout) {
-          const parsed = JSON.parse(res.stdout);
+        if (stdout) {
+          const parsed = JSON.parse(stdout);
           const streams: Array<Record<string, unknown>> = Array.isArray(parsed.streams)
             ? parsed.streams
             : [];
@@ -189,7 +248,7 @@ export class VectorRunner {
     outSvgPath: string,
     onProgress: (ev: JobProgressEvent) => void
   ): Promise<void> {
-    const vtracerBin = this.findOptionalBinary('vtracer');
+    const vtracerBin = await this.findOptionalBinary('vtracer');
     const speckleMap = { low: 12, medium: 6, high: 2 };
     const speckleVal = speckleMap[config.detailLevel] || 6;
 
@@ -268,32 +327,42 @@ vtracer.convert_image_to_svg_py(
     const aspect = Math.max(0.1, (config.height || 1024) / (config.width || 1024));
     const gridH = Math.max(16, Math.round(gridW * aspect));
 
-    const res = spawnSync(
-      this.getFfmpegPath(),
-      [
-        '-v',
-        'error',
-        '-i',
-        config.inputPath,
-        '-vf',
-        `scale=${gridW}:${gridH}:flags=area`,
-        '-frames:v',
-        '1',
-        '-f',
-        'rawvideo',
-        '-pix_fmt',
-        'rgba',
-        'pipe:1'
-      ],
-      { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout: 15000 }
-    );
+    let rgba: Buffer;
+    try {
+      rgba = await this.spawnBufferAsync(
+        this.getFfmpegPath(),
+        [
+          '-v',
+          'error',
+          '-i',
+          config.inputPath,
+          '-vf',
+          `scale=${gridW}:${gridH}:flags=area`,
+          '-frames:v',
+          '1',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          'pipe:1'
+        ],
+        16 * 1024 * 1024,
+        15000
+      );
+    } catch (decodeErr) {
+      if (this.cancelledJobs.has(jobId)) {
+        this.cancelledJobs.delete(jobId);
+        throw new Error('Job cancelled by user');
+      }
+      throw new Error(`Failed to decode raster image for SVG vectorization: ${(decodeErr as Error).message}`);
+    }
 
     if (this.cancelledJobs.has(jobId)) {
       this.cancelledJobs.delete(jobId);
       throw new Error('Job cancelled by user');
     }
 
-    if (res.status !== 0 || !res.stdout || res.stdout.length < gridW * gridH * 4) {
+    if (rgba.length < gridW * gridH * 4) {
       throw new Error('Failed to decode raster image for SVG vectorization.');
     }
 
@@ -303,8 +372,6 @@ vtracer.convert_image_to_svg_py(
       progress: 65,
       statusMessage: `Quantizing ${config.colorMode === 'binary' ? 'monochrome ink' : 'multi-color'} vector layers...`
     });
-
-    const rgba = res.stdout;
     const step = config.colorMode === 'binary' ? 255 : config.detailLevel === 'high' ? 32 : 48;
     const colorRuns = new Map<string, string[]>();
 
@@ -456,32 +523,38 @@ out_rgba.save(out_path, 'PNG')
     });
 
     // Sample a 32x32 thumbnail to detect dominant corner/border studio backdrop color
-    const thumbRes = spawnSync(
-      this.getFfmpegPath(),
-      [
-        '-v',
-        'error',
-        '-i',
-        config.inputPath,
-        '-vf',
-        'scale=32:32',
-        '-frames:v',
-        '1',
-        '-f',
-        'rawvideo',
-        '-pix_fmt',
-        'rgba',
-        'pipe:1'
-      ],
-      { windowsHide: true, timeout: 8000 }
-    );
+    let thumbBuf: Buffer | null = null;
+    try {
+      thumbBuf = await this.spawnBufferAsync(
+        this.getFfmpegPath(),
+        [
+          '-v',
+          'error',
+          '-i',
+          config.inputPath,
+          '-vf',
+          'scale=32:32',
+          '-frames:v',
+          '1',
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgba',
+          'pipe:1'
+        ],
+        32 * 32 * 4 + 1024,
+        8000
+      );
+    } catch {
+      // Fall through to white backdrop
+    }
 
     let bgR = 255;
     let bgG = 255;
     let bgB = 255;
 
-    if (thumbRes.status === 0 && thumbRes.stdout && thumbRes.stdout.length >= 32 * 32 * 4) {
-      const buf = thumbRes.stdout;
+    if (thumbBuf && thumbBuf.length >= 32 * 32 * 4) {
+      const buf = thumbBuf;
       const corners = [
         0,
         31 * 4,
@@ -532,7 +605,7 @@ out_rgba.save(out_path, 'PNG')
     scale: 2 | 4,
     onProgress: (ev: JobProgressEvent) => void
   ): Promise<void> {
-    const esrganBin = this.findOptionalBinary('realesrgan-ncnn-vulkan');
+    const esrganBin = await this.findOptionalBinary('realesrgan-ncnn-vulkan');
     if (esrganBin) {
       onProgress({
         jobId,
@@ -707,7 +780,7 @@ final_rgba.save(out_path, 'PNG')
   }
 
   public cancelJob(jobId: string): boolean {
-    this.cancelledJobs.add(jobId);
+    this.markCancelled(jobId);
     const proc = this.activeProcesses.get(jobId);
     if (proc) {
       killProcessTree(proc);
@@ -719,7 +792,7 @@ final_rgba.save(out_path, 'PNG')
 
   public cancelAll(): void {
     for (const [jobId, proc] of this.activeProcesses.entries()) {
-      this.cancelledJobs.add(jobId);
+      this.markCancelled(jobId);
       killProcessTree(proc);
     }
     this.activeProcesses.clear();

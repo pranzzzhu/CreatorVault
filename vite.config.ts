@@ -5,6 +5,9 @@ import tailwindcss from '@tailwindcss/vite';
 import electron from 'vite-plugin-electron/simple';
 
 export default defineConfig({
+  optimizeDeps: {
+    entries: ['index.html']
+  },
   plugins: [
     tailwindcss(),
     react(),
@@ -15,7 +18,19 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['electron', 'node:child_process', 'node:fs', 'node:path', 'node:os', 'node:crypto']
+              external: [
+                'electron',
+                'node:child_process',
+                'node:fs',
+                'node:fs/promises',
+                'node:path',
+                'node:os',
+                'node:crypto',
+                'node:url',
+                'node:util',
+                'node:stream',
+                'node:stream/promises'
+              ]
             }
           }
         }

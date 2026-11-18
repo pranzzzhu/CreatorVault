@@ -45,7 +45,12 @@ export interface ConverterJobConfig {
   outputDir: string;
 }
 
-export type ThemeMode = 'antigravity-dark' | 'antigravity-light';
+export type ThemeMode = 'dark' | 'light';
+
+/** Normalizes legacy persisted theme values ('antigravity-dark' | 'antigravity-light') to Astryx modes. */
+export function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === 'light' || value === 'antigravity-light' ? 'light' : 'dark';
+}
 
 export type SourcePlatform =
   | 'YouTube'

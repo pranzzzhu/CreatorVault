@@ -1,18 +1,30 @@
 import React from 'react';
 import {
-  ChevronDown,
   Clock,
   Download,
-  FolderOpen,
-  Info,
   Scissors,
   Sliders,
   User,
   X
 } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
+import { Card } from '@astryxdesign/core/Card';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { InfoTip } from '@astryxdesign/core/InfoTip';
+import { HStack, VStack } from '@astryxdesign/core/Layout';
+import { Selector } from '@astryxdesign/core/Selector';
+import { Text } from '@astryxdesign/core/Text';
 import { useJobStore } from '../../store/useJobStore';
+import { OutputFolderButton } from '../shared/OutputFolderButton';
 import { TimeRangeSlider, formatMmSsMs } from './TimeRangeSlider';
-import type { StemMode } from '../../types/media';
+import type { QualityPreset, StemMode } from '../../types/media';
+
+const STEM_OPTIONS: Array<{ value: StemMode; label: string }> = [
+  { value: 'off', label: 'Off' },
+  { value: '2-stem', label: 'Vocals + Instrumental' },
+  { value: '4-stem', label: 'Vocals, Drums, Bass, Other' }
+];
 
 export const StagingCard: React.FC = () => {
   const stagedMedia = useJobStore((s) => s.stagedMedia);
@@ -26,18 +38,12 @@ export const StagingCard: React.FC = () => {
   const setTimeRange = useJobStore((s) => s.setTimeRange);
   const stemMode = useJobStore((s) => s.stemMode);
   const setStemMode = useJobStore((s) => s.setStemMode);
-  const outputDir = useJobStore((s) => s.outputDir);
-  const chooseOutputDirectory = useJobStore((s) => s.chooseOutputDirectory);
   const clearStagedMedia = useJobStore((s) => s.clearStagedMedia);
   const enqueueAndRunStagedJob = useJobStore((s) => s.enqueueAndRunStagedJob);
 
   if (!stagedMedia) {
     return null;
   }
-
-  const activeQualityObj =
-    stagedMedia.availableQualities.find((q) => q.id === selectedQuality) ||
-    stagedMedia.availableQualities[0];
 
   const formatSummary = selectedQuality.startsWith('audio')
     ? editReadyMode || selectedQuality === 'audio-wav'
@@ -56,170 +62,127 @@ export const StagingCard: React.FC = () => {
         ? 'Cut & Download Clip'
         : 'Download';
 
+  const qualityOptions = stagedMedia.availableQualities.map((q) => {
+    const codec = editReadyMode ? (q.isAudioOnly ? 'WAV' : 'MP4') : q.codecBadge;
+    return {
+      value: q.id,
+      label: `${q.label} (${codec})`
+    };
+  });
+
   return (
-    <div className="card bg-base-200 border border-base-300 p-4 space-y-4">
-      <div className="flex flex-col md:flex-row gap-4 justify-between">
-        <div className="flex gap-3.5 min-w-0">
-          <div className="relative w-36 h-20 rounded-lg overflow-hidden bg-base-300 shrink-0">
-            <img
-              src={stagedMedia.thumbnail}
-              alt={stagedMedia.title}
-              className="w-full h-full object-cover"
-            />
-            <span className="badge badge-xs badge-neutral absolute bottom-1.5 right-1.5 num">
-              {formatMmSsMs(stagedMedia.duration)}
-            </span>
-          </div>
-
-          <div className="flex flex-col justify-between min-w-0 py-0.5">
-            <div className="flex items-center gap-2">
-              <span className="badge badge-xs badge-accent">
-                {stagedMedia.platform}
-              </span>
-              {stagedMedia.isSimulatedProbe && (
-                <span className="badge badge-xs badge-warning">
-                  Preview mode
-                </span>
-              )}
-              <span className="text-xs text-base-content/60 flex items-center gap-1 truncate">
-                <User className="w-3 h-3" /> {stagedMedia.uploader}
-              </span>
-            </div>
-
-            <h3 className="text-sm font-semibold text-base-content truncate pr-4">
-              {stagedMedia.title}
-            </h3>
-
-            <div className="flex items-center gap-2 text-xs text-base-content/60">
-              <Clock className="w-3.5 h-3.5 text-accent" />
-              <span>
-                Saves as: <strong className="text-base-content num">{formatSummary}</strong>
-              </span>
-              <div
-                className="tooltip tooltip-right"
-                data-tip="Automatically saves videos as standard MP4 and audio as WAV so they drop right into Premiere, Resolve, or FL Studio without lag."
-              >
-                <button
-                  type="button"
-                  aria-label="Format info"
-                  className="btn btn-ghost btn-xs btn-circle text-base-content/50 hover:text-base-content"
-                >
-                  <Info className="w-3.5 h-3.5" />
-                </button>
+    <Card padding={4} className="bg-surface">
+      <VStack gap={4}>
+        <div className="flex flex-col md:flex-row gap-4 justify-between">
+          <div className="flex gap-3.5 min-w-0">
+            <div className="relative w-36 h-20 rounded-md overflow-hidden bg-muted border border-border shrink-0">
+              <img
+                src={stagedMedia.thumbnail}
+                alt={stagedMedia.title}
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute bottom-1.5 right-1.5">
+                <Badge variant="neutral" label={formatMmSsMs(stagedMedia.duration)} />
               </div>
             </div>
+
+            <div className="flex flex-col justify-between min-w-0 py-0.5 gap-1">
+              <HStack vAlign="center" gap={2} wrap="wrap">
+                <Badge variant="info" label={stagedMedia.platform} />
+                {stagedMedia.isSimulatedProbe && (
+                  <Badge variant="warning" label="Preview mode" />
+                )}
+                <HStack vAlign="center" gap={1} className="min-w-0">
+                  <User className="w-3 h-3 text-secondary shrink-0" />
+                  <Text size="sm" color="secondary" maxLines={1}>
+                    {stagedMedia.uploader}
+                  </Text>
+                </HStack>
+              </HStack>
+
+              <Text size="sm" weight="semibold" color="primary" maxLines={1}>
+                {stagedMedia.title}
+              </Text>
+
+              <HStack vAlign="center" gap={1.5}>
+                <Clock className="w-3.5 h-3.5 text-info shrink-0" />
+                <Text size="sm" color="secondary">
+                  Saves as:{' '}
+                  <strong className="text-primary font-medium num">{formatSummary}</strong>
+                </Text>
+                <InfoTip
+                  label="Format info"
+                  size="xsm"
+                  content="Automatically saves videos as standard MP4 and audio as WAV so they drop right into Premiere, Resolve, or FL Studio without lag."
+                />
+              </HStack>
+            </div>
           </div>
+
+          {/* Quality Selector + Close Button */}
+          <HStack vAlign="start" gap={1.5} className="shrink-0">
+            <Selector
+              label="Choose quality"
+              isLabelHidden
+              size="sm"
+              width={215}
+              value={selectedQuality}
+              onChange={(val) => setSelectedQuality(val as QualityPreset)}
+              options={qualityOptions}
+            />
+
+            <IconButton
+              label="Clear staged media"
+              variant="ghost"
+              size="sm"
+              icon={<X className="w-4 h-4" />}
+              onClick={clearStagedMedia}
+            />
+          </HStack>
         </div>
 
-        {/* Quality Dropdown + Close Button */}
-        <div className="flex items-start gap-2 shrink-0">
-          <details className="dropdown dropdown-end">
-            <summary className="btn btn-sm btn-outline gap-2 font-normal">
-              <span>{activeQualityObj?.label || selectedQuality}</span>
-              <span className="badge badge-xs badge-neutral num">
-                {editReadyMode
-                  ? activeQualityObj?.isAudioOnly
-                    ? 'WAV'
-                    : 'MP4'
-                  : activeQualityObj?.codecBadge}
-              </span>
-              <ChevronDown className="w-3.5 h-3.5 opacity-60" />
-            </summary>
-            <ul className="dropdown-content menu bg-base-100 rounded-box z-20 w-64 p-2 shadow-xl border border-base-300 mt-1">
-              <li className="menu-title text-xs">Choose quality</li>
-              {stagedMedia.availableQualities.map((q) => (
-                <li key={q.id}>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      setSelectedQuality(q.id);
-                      const details = e.currentTarget.closest('details');
-                      if (details) details.removeAttribute('open');
-                    }}
-                    className={`flex items-center justify-between ${
-                      selectedQuality === q.id ? 'menu-active' : ''
-                    }`}
-                  >
-                    <span>{q.label}</span>
-                    <span className="badge badge-xs badge-ghost num">
-                      {editReadyMode ? (q.isAudioOnly ? 'WAV' : 'MP4') : q.codecBadge}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </details>
+        <TimeRangeSlider
+          duration={stagedMedia.duration}
+          startTime={startTime}
+          endTime={endTime}
+          trimEnabled={trimEnabled}
+          onToggleTrim={setTrimEnabled}
+          onChangeRange={setTimeRange}
+        />
 
-          <button
-            type="button"
-            onClick={clearStagedMedia}
-            title="Close"
-            className="btn btn-sm btn-ghost btn-square"
-          >
-            <X className="w-4 h-4" />
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+          <HStack vAlign="center" gap={2} wrap="wrap">
+            <HStack vAlign="center" gap={1.5}>
+              <Sliders className="w-3.5 h-3.5 text-info" />
+              <Text size="sm" weight="medium" color="secondary">
+                Split audio stems:
+              </Text>
+            </HStack>
+
+            <Selector
+              label="Split audio stems"
+              isLabelHidden
+              size="sm"
+              width={220}
+              value={stemMode}
+              onChange={(val) => setStemMode(val as StemMode)}
+              options={STEM_OPTIONS}
+            />
+          </HStack>
+
+          <HStack vAlign="center" gap={2}>
+            <OutputFolderButton />
+
+            <Button
+              label={downloadButtonLabel}
+              variant="primary"
+              size="sm"
+              icon={trimEnabled ? <Scissors className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+              onClick={enqueueAndRunStagedJob}
+            />
+          </HStack>
         </div>
-      </div>
-
-      <TimeRangeSlider
-        duration={stagedMedia.duration}
-        startTime={startTime}
-        endTime={endTime}
-        trimEnabled={trimEnabled}
-        onToggleTrim={setTrimEnabled}
-        onChangeRange={setTimeRange}
-      />
-
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-medium text-base-content/80 mr-1">
-            <Sliders className="w-3.5 h-3.5 text-accent" />
-            <span>Split audio stems:</span>
-          </span>
-
-          <div className="join">
-            {(
-              [
-                { id: 'off', label: 'Off' },
-                { id: '2-stem', label: 'Vocals + Instrumental' },
-                { id: '4-stem', label: 'Vocals, Drums, Bass, Other' }
-              ] as Array<{ id: StemMode; label: string }>
-            ).map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setStemMode(opt.id)}
-                className={`btn btn-xs join-item ${
-                  stemMode === opt.id ? 'btn-primary' : 'btn-outline'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={chooseOutputDirectory}
-            title={`Save folder: ${outputDir}`}
-            className="btn btn-sm btn-ghost border border-base-300 gap-1.5 max-w-[220px] font-normal"
-          >
-            <FolderOpen className="w-3.5 h-3.5 text-accent shrink-0" />
-            <span className="truncate num text-xs">{outputDir || 'Save folder'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={enqueueAndRunStagedJob}
-            className="btn btn-sm btn-primary gap-2"
-          >
-            {trimEnabled ? <Scissors className="w-4 h-4" /> : <Download className="w-4 h-4" />}
-            <span>{downloadButtonLabel}</span>
-          </button>
-        </div>
-      </div>
-    </div>
+      </VStack>
+    </Card>
   );
 };

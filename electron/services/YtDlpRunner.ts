@@ -17,6 +17,16 @@ export class YtDlpRunner {
   private activeProcesses = new Map<string, ChildProcess>();
   private cancelledJobs = new Set<string>();
 
+  private markCancelled(jobId: string): void {
+    if (this.cancelledJobs.size > 200) {
+      const oldest = this.cancelledJobs.values().next().value;
+      if (oldest) this.cancelledJobs.delete(oldest);
+    }
+    this.cancelledJobs.add(jobId);
+    const timer = setTimeout(() => this.cancelledJobs.delete(jobId), 60_000);
+    timer.unref?.();
+  }
+
   constructor(
     private getYtDlpPath: () => string,
     private isYtDlpAvailable: () => boolean,
@@ -150,16 +160,20 @@ export class YtDlpRunner {
     }
   }
 
+  private nodeAvailable: boolean | null = null;
+
   private isNodeAvailable(): boolean {
+    if (this.nodeAvailable !== null) return this.nodeAvailable;
     try {
       const res = spawnSync(process.platform === 'win32' ? 'where' : 'which', ['node'], {
         windowsHide: true,
         timeout: 1500
       });
-      return res.status === 0;
+      this.nodeAvailable = res.status === 0;
     } catch {
-      return false;
+      this.nodeAvailable = false;
     }
+    return this.nodeAvailable;
   }
 
   private runYtDlpProbe(
@@ -202,7 +216,7 @@ export class YtDlpRunner {
       });
 
       proc.stderr.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        stderr = (stderr + chunk.toString()).slice(-16384);
       });
 
       proc.on('error', (err) => {
@@ -482,7 +496,7 @@ export class YtDlpRunner {
       });
 
       proc.stderr.on('data', (chunk: Buffer) => {
-        stderrLog += chunk.toString();
+        stderrLog = (stderrLog + chunk.toString()).slice(-16384);
       });
 
       proc.on('error', (err) => {
@@ -661,7 +675,7 @@ export class YtDlpRunner {
   }
 
   public cancelJob(jobId: string): boolean {
-    this.cancelledJobs.add(jobId);
+    this.markCancelled(jobId);
     const proc = this.activeProcesses.get(jobId);
     if (proc) {
       killProcessTree(proc);
@@ -673,7 +687,7 @@ export class YtDlpRunner {
 
   public cancelAll(): void {
     for (const [jobId, proc] of this.activeProcesses.entries()) {
-      this.cancelledJobs.add(jobId);
+      this.markCancelled(jobId);
       killProcessTree(proc);
     }
     this.activeProcesses.clear();

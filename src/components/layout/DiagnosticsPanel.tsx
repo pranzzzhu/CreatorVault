@@ -6,31 +6,43 @@ import {
   Download,
   FolderOpen,
   Globe,
-  Loader2,
   Moon,
   RefreshCw,
   ShieldCheck,
   Sun,
-  X,
   XCircle,
   Zap
 } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Banner } from '@astryxdesign/core/Banner';
+import { Button } from '@astryxdesign/core/Button';
+import { ButtonGroup } from '@astryxdesign/core/ButtonGroup';
+import { Card } from '@astryxdesign/core/Card';
+import { Code } from '@astryxdesign/core/Code';
+import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
+import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
+import { Text } from '@astryxdesign/core/Text';
 import { useJobStore } from '../../store/useJobStore';
-import type { BinaryName, BrowserSource } from '../../types/media';
+import { normalizeThemeMode, type BinaryName, type BrowserSource, type ThemeMode } from '../../types/media';
 
-const BROWSER_OPTIONS: Array<{ id: BrowserSource; label: string }> = [
-  { id: 'none', label: 'Off (Anonymous)' },
-  { id: 'firefox', label: 'Firefox (Recommended on Windows)' },
-  { id: 'chrome', label: 'Google Chrome' },
-  { id: 'brave', label: 'Brave Browser' },
-  { id: 'edge', label: 'Microsoft Edge' }
+const BROWSER_OPTIONS: Array<{ value: BrowserSource; label: string }> = [
+  { value: 'none', label: 'Off (Anonymous)' },
+  { value: 'firefox', label: 'Firefox (Recommended on Windows)' },
+  { value: 'chrome', label: 'Google Chrome' },
+  { value: 'brave', label: 'Brave Browser' },
+  { value: 'edge', label: 'Microsoft Edge' }
 ];
 
 export const DiagnosticsPanel: React.FC = () => {
   const isSettingsModalOpen = useJobStore((s) => s.isSettingsModalOpen);
   const setSettingsModalOpen = useJobStore((s) => s.setSettingsModalOpen);
 
-  const themeMode = useJobStore((s) => s.themeMode);
+  const rawThemeMode = useJobStore((s) => s.themeMode);
+  const themeMode = normalizeThemeMode(rawThemeMode);
   const setThemeMode = useJobStore((s) => s.setThemeMode);
 
   const zoomFactor = useJobStore((s) => s.zoomFactor);
@@ -58,10 +70,6 @@ export const DiagnosticsPanel: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const [installNotice, setInstallNotice] = useState<string | null>(null);
-
-  if (!isSettingsModalOpen) {
-    return null;
-  }
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -93,391 +101,357 @@ export const DiagnosticsPanel: React.FC = () => {
     setTimeout(() => setCopiedCmd(null), 1800);
   };
 
-  const activeBrowserLabel =
-    BROWSER_OPTIONS.find((b) => b.id === browserCookies)?.label || 'Off (Anonymous)';
+  const hasMissingBinaries =
+    diagnostics !== null && Object.values(diagnostics.binaries).some((b) => !b.available);
 
   return (
-    <dialog className="modal modal-open">
-      <div className="modal-box max-w-2xl bg-base-200 border border-base-300 p-0 overflow-hidden">
-        {/* Modal Header */}
-        <div className="px-6 py-4 bg-base-100 border-b border-base-300 flex items-center justify-between">
-          <div>
-            <h3 className="text-base font-semibold text-base-content">
-              Settings & Engine Configuration
-            </h3>
-            <p className="text-xs text-base-content/60 mt-0.5">
-              Appearance, NLE codec behavior, hardware acceleration, and local sidecar binaries
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setSettingsModalOpen(false)}
-            className="btn btn-ghost btn-sm btn-square"
-            aria-label="Close settings"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+    <Dialog
+      isOpen={isSettingsModalOpen}
+      onOpenChange={setSettingsModalOpen}
+      width={680}
+      maxHeight="82vh"
+    >
+      <Layout
+        header={
+          <DialogHeader
+            title="Settings & Engine Configuration"
+            subtitle="Appearance, NLE codec behavior, hardware acceleration, and local sidecar binaries"
+            onOpenChange={setSettingsModalOpen}
+            hasDivider
+          />
+        }
+        content={
+          <LayoutContent>
+            <VStack gap={5}>
+              {/* 1. Appearance & Storage */}
+              <VStack gap={2}>
+                <Text type="supporting" size="sm" weight="semibold" color="secondary">
+                  Appearance & Storage
+                </Text>
 
-        {/* Scrollable Settings Body */}
-        <div className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
-          {/* 1. Appearance & Default Export Folder */}
-          <section className="space-y-3">
-            <h4 className="text-xs font-semibold text-base-content/60">
-              Appearance & Storage
-            </h4>
+                <Card padding={0} className="overflow-hidden">
+                  <div className="divide-y divide-border">
+                    {/* Theme Switcher */}
+                    <div className="p-4 flex items-center justify-between gap-4">
+                      <VStack gap={0.5}>
+                        <Text size="sm" weight="medium" color="primary">
+                          Color theme
+                        </Text>
+                        <Text type="supporting" size="sm" color="secondary">
+                          Switch between Astryx Dark and clean Daylight mode.
+                        </Text>
+                      </VStack>
 
-            <div className="card bg-base-100 border border-base-300 divide-y divide-base-300">
-              {/* Theme Switcher */}
-              <div className="p-4 flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-sm font-medium text-base-content">
-                    Color theme
-                  </div>
-                  <p className="text-xs text-base-content/60 mt-0.5">
-                    Switch between Antigravity Dark charcoal and clean Daylight mode.
-                  </p>
-                </div>
+                      <SegmentedControl
+                        label="Color theme"
+                        size="sm"
+                        value={themeMode}
+                        onChange={(val) => setThemeMode(val as ThemeMode)}
+                      >
+                        <SegmentedControlItem
+                          value="dark"
+                          label="Dark"
+                          icon={<Moon className="w-3.5 h-3.5" />}
+                        />
+                        <SegmentedControlItem
+                          value="light"
+                          label="Light"
+                          icon={<Sun className="w-3.5 h-3.5" />}
+                        />
+                      </SegmentedControl>
+                    </div>
 
-                <div className="join">
-                  <button
-                    type="button"
-                    onClick={() => setThemeMode('antigravity-dark')}
-                    className={`btn btn-sm join-item gap-1.5 ${
-                      themeMode === 'antigravity-dark' ? 'btn-primary' : 'btn-ghost'
-                    }`}
-                  >
-                    <Moon className="w-3.5 h-3.5" />
-                    <span>Dark</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setThemeMode('antigravity-light')}
-                    className={`btn btn-sm join-item gap-1.5 ${
-                      themeMode === 'antigravity-light' ? 'btn-primary' : 'btn-ghost'
-                    }`}
-                  >
-                    <Sun className="w-3.5 h-3.5" />
-                    <span>Light</span>
-                  </button>
-                </div>
-              </div>
+                    {/* Interface Zoom Scale */}
+                    <div className="p-4 flex items-center justify-between gap-4">
+                      <VStack gap={0.5}>
+                        <Text size="sm" weight="medium" color="primary">
+                          Interface zoom scale
+                        </Text>
+                        <Text type="supporting" size="sm" color="secondary">
+                          Scale workspace (<Code size="inherit">Ctrl +</Code> /{' '}
+                          <Code size="inherit">Ctrl -</Code> / <Code size="inherit">Ctrl 0</Code> or{' '}
+                          <Code size="inherit">Ctrl + Scroll</Code>).
+                        </Text>
+                      </VStack>
 
-              {/* UI Scale / Zoom Control */}
-              <div className="p-4 flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-sm font-medium text-base-content">
-                    Interface zoom scale
-                  </div>
-                  <p className="text-xs text-base-content/60 mt-0.5">
-                    Scale the entire workspace (<code className="text-base-content num">Ctrl +</code> / <code className="text-base-content num">Ctrl -</code> / <code className="text-base-content num">Ctrl 0</code> or <code className="text-base-content num">Ctrl + Scroll</code>).
-                  </p>
-                </div>
+                      <ButtonGroup label="Interface zoom scale" size="sm">
+                        <Button label="-" variant="secondary" onClick={zoomOut} />
+                        <Button
+                          label={`${Math.round(zoomFactor * 100)}%`}
+                          variant="secondary"
+                          tooltip="Reset to 100%"
+                          onClick={resetZoom}
+                          className="tabular-nums"
+                        />
+                        <Button label="+" variant="secondary" onClick={zoomIn} />
+                      </ButtonGroup>
+                    </div>
 
-                <div className="join">
-                  <button
-                    type="button"
-                    onClick={zoomOut}
-                    className="btn btn-sm btn-outline join-item"
-                  >
-                    -
-                  </button>
-                  <button
-                    type="button"
-                    onClick={resetZoom}
-                    title="Click to reset to 100%"
-                    className="btn btn-sm btn-outline join-item num min-w-16"
-                  >
-                    {Math.round(zoomFactor * 100)}%
-                  </button>
-                  <button
-                    type="button"
-                    onClick={zoomIn}
-                    className="btn btn-sm btn-outline join-item"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
+                    {/* Default Export Directory */}
+                    <div className="p-4 flex items-center justify-between gap-4">
+                      <VStack gap={0.5} className="min-w-0 flex-1">
+                        <Text size="sm" weight="medium" color="primary">
+                          Default export directory
+                        </Text>
+                        <Text type="supporting" size="sm" color="secondary" maxLines={1} className="num">
+                          {outputDir || diagnostics?.defaultOutputDir || 'Downloads/Vortex_Exports'}
+                        </Text>
+                      </VStack>
 
-              {/* Default Output Directory */}
-              <div className="p-4 flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-base-content">
-                    Default export directory
-                  </div>
-                  <p className="text-xs text-base-content/60 truncate mt-0.5 num">
-                    {outputDir || diagnostics?.defaultOutputDir || 'Downloads/Vortex_Exports'}
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={chooseOutputDirectory}
-                  className="btn btn-sm btn-outline gap-1.5 shrink-0"
-                >
-                  <FolderOpen className="w-3.5 h-3.5" />
-                  <span>Change folder</span>
-                </button>
-              </div>
-            </div>
-          </section>
-
-          {/* 2. Media Pipeline & NLE Compatibility */}
-          <section className="space-y-3">
-            <h4 className="text-xs font-semibold text-base-content/60">
-              Pipeline & NLE Compatibility
-            </h4>
-
-            <div className="card bg-base-100 border border-base-300 divide-y divide-base-300">
-              {/* Edit-Ready Safe Mode vs Raw Stream */}
-              <div className="p-4 flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Zap className="w-4 h-4 text-accent" />
-                    <span className="text-sm font-medium text-base-content">
-                      Edit-Ready Safe Mode (MP4 / 48kHz WAV)
-                    </span>
-                  </div>
-                  <p className="text-xs text-base-content/60 leading-relaxed">
-                    When enabled, forces H.264 (<code className="text-base-content">avc1</code>) + AAC inside a standard <code className="text-base-content">.mp4</code> container for video, uncompressed <code className="text-base-content">48kHz 16-bit PCM .wav</code> for audio, and <code className="text-base-content">.png</code> for thumbnails so files never lag or drift in Adobe Premiere Pro, After Effects, or DaVinci Resolve. Turn off to download untouched raw <code className="text-base-content">.webm / .mkv</code> streams.
-                  </p>
-                </div>
-
-                <input
-                  type="checkbox"
-                  checked={editReadyMode}
-                  onChange={(e) => setEditReadyMode(e.target.checked)}
-                  className="toggle toggle-primary mt-1 shrink-0"
-                />
-              </div>
-
-              {/* Simulation Fallback Mode */}
-              <div className="p-4 flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-info" />
-                    <span className="text-sm font-medium text-base-content">
-                      Simulated Fallback Mode for Missing Binaries
-                    </span>
-                  </div>
-                  <p className="text-xs text-base-content/60 leading-relaxed">
-                    If an optional sidecar binary (such as <code className="text-base-content">demucs</code> for AI stem separation or <code className="text-base-content">ffmpeg</code>) is not installed on your system yet, Vortex synthesizes a valid, playable 48kHz stereo WAV file on disk. This allows you to test the in-app multi-stem Solo/Mute audition mixer and native OS drag-and-drop into your video editor without pipeline crashes.
-                  </p>
-                </div>
-
-                <input
-                  type="checkbox"
-                  checked={simulateIfMissingBinary}
-                  onChange={(e) => setSimulateIfMissingBinary(e.target.checked)}
-                  className="toggle toggle-primary mt-1 shrink-0"
-                />
-              </div>
-
-              {/* Browser Cookie Bypass (daisyUI 5 Dropdown) */}
-              <div className="p-4 flex items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-base-content/70" />
-                    <span className="text-sm font-medium text-base-content">
-                      Browser cookie authentication
-                    </span>
-                  </div>
-                  <p className="text-xs text-base-content/60">
-                    Passes <code className="text-base-content">--cookies-from-browser</code> to bypass Instagram Reel login walls or age-restricted YouTube videos.
-                  </p>
-                </div>
-
-                <details className="dropdown dropdown-end shrink-0">
-                  <summary className="btn btn-sm btn-outline m-1">
-                    {activeBrowserLabel}
-                  </summary>
-                  <ul className="dropdown-content menu bg-base-200 rounded-box z-20 w-64 p-2 shadow-lg border border-base-300">
-                    {BROWSER_OPTIONS.map((item) => (
-                      <li key={item.id}>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            setBrowserCookies(item.id);
-                            const details = e.currentTarget.closest('details');
-                            if (details) details.removeAttribute('open');
-                          }}
-                          className={browserCookies === item.id ? 'menu-active' : ''}
-                        >
-                          {item.label}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              </div>
-            </div>
-          </section>
-
-          {/* 3. Hardware Telemetry & Sidecar Binaries (./bin) */}
-          <section className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h4 className="text-xs font-semibold text-base-content/60">
-                Hardware Acceleration & Sidecar Binaries (<code className="num">./bin</code>)
-              </h4>
-
-              <div className="flex items-center gap-2">
-                {diagnostics &&
-                  Object.values(diagnostics.binaries).some((b) => !b.available) && (
-                    <button
-                      type="button"
-                      onClick={handleInstallAllMissing}
-                      className="btn btn-xs btn-primary gap-1"
-                    >
-                      <Download className="w-3 h-3" />
-                      <span>Install all missing</span>
-                    </button>
-                  )}
-                {diagnostics && (
-                  <button
-                    type="button"
-                    onClick={() => window.vortexApi?.openFolder(diagnostics.binDir)}
-                    className="btn btn-xs btn-ghost gap-1"
-                  >
-                    <FolderOpen className="w-3.5 h-3.5" />
-                    <span>Open ./bin folder</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={handleRefresh}
-                  className="btn btn-xs btn-outline gap-1"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isRefreshing ? 'animate-spin' : ''}`} />
-                  <span>Re-scan</span>
-                </button>
-              </div>
-            </div>
-
-            {installNotice && (
-              <div className="alert alert-info py-2 px-3 text-xs">
-                <span>{installNotice}</span>
-              </div>
-            )}
-
-            <div className="card bg-base-100 border border-base-300 divide-y divide-base-300">
-              {/* GPU Telemetry Row */}
-              {diagnostics && (
-                <div className="p-4 flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <Cpu className="w-5 h-5 text-accent shrink-0" />
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-base-content">
-                          {diagnostics.hardware.gpuName}
-                        </span>
-                        <span className="badge badge-xs badge-accent">
-                          {diagnostics.hardware.acceleratorBadge}
-                        </span>
-                      </div>
-                      <p className="text-xs text-base-content/60 mt-0.5">
-                        Demucs target flag: <code className="text-base-content">-d {diagnostics.hardware.recommendedDevice}</code> · Hardware H.264 encoder: <code className="text-base-content">{diagnostics.hardware.hasNvenc ? 'h264_nvenc' : 'CPU libx264'}</code>
-                      </p>
+                      <Button
+                        label="Change folder"
+                        variant="secondary"
+                        size="sm"
+                        icon={<FolderOpen className="w-3.5 h-3.5" />}
+                        onClick={chooseOutputDirectory}
+                      />
                     </div>
                   </div>
-                </div>
-              )}
+                </Card>
+              </VStack>
 
-              {/* Binary Status Rows */}
-              {diagnostics &&
-                Object.values(diagnostics.binaries).map((bin) => {
-                  const isInstalling = Boolean(installingBinaries[bin.name]);
-                  return (
-                    <div
-                      key={bin.name}
-                      className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                    >
-                      <div className="flex items-start gap-2.5 min-w-0">
-                        {bin.available ? (
-                          <CheckCircle2 className="w-4 h-4 text-success shrink-0 mt-0.5" />
-                        ) : (
-                          <XCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
-                        )}
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-base-content num">
-                              {bin.name}
-                            </span>
-                            <span
-                              className={`badge badge-xs ${
-                                bin.available ? 'badge-success badge-soft' : 'badge-warning badge-soft'
-                              }`}
-                            >
-                              {bin.source}
-                            </span>
-                            {bin.version && (
-                              <span className="text-[11px] text-base-content/50 truncate num">
-                                {bin.version}
-                              </span>
-                            )}
+              {/* 2. Pipeline & NLE Compatibility */}
+              <VStack gap={2}>
+                <Text type="supporting" size="sm" weight="semibold" color="secondary">
+                  Pipeline & NLE Compatibility
+                </Text>
+
+                <Card padding={0} className="overflow-hidden">
+                  <div className="divide-y divide-border">
+                    <div className="p-4 flex items-start justify-between gap-4">
+                      <VStack gap={1}>
+                        <HStack vAlign="center" gap={2}>
+                          <Zap className="w-4 h-4 text-info shrink-0" />
+                          <Text size="sm" weight="medium" color="primary">
+                            Edit-Ready Safe Mode (MP4 / 48kHz WAV)
+                          </Text>
+                        </HStack>
+                        <Text type="supporting" size="sm" color="secondary">
+                          Forces H.264 (<Code size="inherit">avc1</Code>) + AAC inside{' '}
+                          <Code size="inherit">.mp4</Code>, uncompressed{' '}
+                          <Code size="inherit">48kHz 16-bit PCM .wav</Code> audio, and{' '}
+                          <Code size="inherit">.png</Code> thumbnails so files never drift in
+                          Premiere Pro, After Effects, or DaVinci Resolve.
+                        </Text>
+                      </VStack>
+
+                      <Switch
+                        label="Edit-Ready Safe Mode"
+                        isLabelHidden
+                        size="sm"
+                        value={editReadyMode}
+                        onChange={(checked) => setEditReadyMode(checked)}
+                      />
+                    </div>
+
+                    <div className="p-4 flex items-start justify-between gap-4">
+                      <VStack gap={1}>
+                        <HStack vAlign="center" gap={2}>
+                          <ShieldCheck className="w-4 h-4 text-info shrink-0" />
+                          <Text size="sm" weight="medium" color="primary">
+                            Simulated Fallback Mode for Missing Binaries
+                          </Text>
+                        </HStack>
+                        <Text type="supporting" size="sm" color="secondary">
+                          When optional binaries (<Code size="inherit">demucs</Code> or{' '}
+                          <Code size="inherit">ffmpeg</Code>) are missing, synthesizes a valid
+                          48kHz stereo WAV so you can test stem auditioning and native NLE drag
+                          without pipeline failures.
+                        </Text>
+                      </VStack>
+
+                      <Switch
+                        label="Simulated Fallback Mode"
+                        isLabelHidden
+                        size="sm"
+                        value={simulateIfMissingBinary}
+                        onChange={(checked) => setSimulateIfMissingBinary(checked)}
+                      />
+                    </div>
+
+                    <div className="p-4 flex items-center justify-between gap-4">
+                      <VStack gap={0.5} className="min-w-0 flex-1">
+                        <HStack vAlign="center" gap={2}>
+                          <Globe className="w-4 h-4 text-secondary shrink-0" />
+                          <Text size="sm" weight="medium" color="primary">
+                            Browser cookie authentication
+                          </Text>
+                        </HStack>
+                        <Text type="supporting" size="sm" color="secondary">
+                          Passes <Code size="inherit">--cookies-from-browser</Code> to bypass login
+                          walls or age-restricted videos.
+                        </Text>
+                      </VStack>
+
+                      <Selector
+                        label="Browser cookie authentication"
+                        isLabelHidden
+                        size="sm"
+                        width={230}
+                        value={browserCookies}
+                        onChange={(val) => setBrowserCookies(val as BrowserSource)}
+                        options={BROWSER_OPTIONS}
+                      />
+                    </div>
+                  </div>
+                </Card>
+              </VStack>
+
+              {/* 3. Hardware Telemetry & Sidecar Binaries */}
+              <VStack gap={2}>
+                <HStack vAlign="center" hAlign="between" gap={2} wrap="wrap">
+                  <Text type="supporting" size="sm" weight="semibold" color="secondary">
+                    Hardware Acceleration & Sidecar Binaries (<Code size="inherit">./bin</Code>)
+                  </Text>
+
+                  <HStack vAlign="center" gap={1.5}>
+                    {hasMissingBinaries && (
+                      <Button
+                        label="Install all missing"
+                        variant="primary"
+                        size="sm"
+                        icon={<Download className="w-3 h-3" />}
+                        onClick={handleInstallAllMissing}
+                      />
+                    )}
+                    {diagnostics && (
+                      <Button
+                        label="Open ./bin"
+                        variant="ghost"
+                        size="sm"
+                        icon={<FolderOpen className="w-3.5 h-3.5" />}
+                        onClick={() => window.vortexApi?.openFolder(diagnostics.binDir)}
+                      />
+                    )}
+                    <Button
+                      label="Re-scan"
+                      variant="secondary"
+                      size="sm"
+                      isLoading={isRefreshing}
+                      icon={<RefreshCw className="w-3 h-3" />}
+                      onClick={handleRefresh}
+                    />
+                  </HStack>
+                </HStack>
+
+                {installNotice && <Banner status="info" title={installNotice} />}
+
+                <Card padding={0} className="overflow-hidden">
+                  <div className="divide-y divide-border">
+                    {diagnostics && (
+                      <div className="p-4 flex items-center gap-3">
+                        <Cpu className="w-5 h-5 text-info shrink-0" />
+                        <VStack gap={0.5} className="min-w-0">
+                          <HStack vAlign="center" gap={2}>
+                            <Text size="sm" weight="medium" color="primary">
+                              {diagnostics.hardware.gpuName}
+                            </Text>
+                            <Badge variant="info" label={diagnostics.hardware.acceleratorBadge} />
+                          </HStack>
+                          <Text type="supporting" size="sm" color="secondary">
+                            Demucs flag:{' '}
+                            <Code size="inherit">-d {diagnostics.hardware.recommendedDevice}</Code>{' '}
+                            · Video encoder:{' '}
+                            <Code size="inherit">
+                              {diagnostics.hardware.hasNvenc ? 'h264_nvenc' : 'CPU libx264'}
+                            </Code>
+                          </Text>
+                        </VStack>
+                      </div>
+                    )}
+
+                    {diagnostics &&
+                      Object.values(diagnostics.binaries).map((bin) => {
+                        const isInstalling = Boolean(installingBinaries[bin.name]);
+                        return (
+                          <div
+                            key={bin.name}
+                            className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                          >
+                            <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                              {bin.available ? (
+                                <CheckCircle2 className="w-4 h-4 text-success shrink-0 mt-0.5" />
+                              ) : (
+                                <XCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+                              )}
+                              <VStack gap={0.5} className="min-w-0 flex-1">
+                                <HStack vAlign="center" gap={2} wrap="wrap">
+                                  <Text size="sm" weight="semibold" color="primary" className="num">
+                                    {bin.name}
+                                  </Text>
+                                  <Badge
+                                    variant={bin.available ? 'success' : 'warning'}
+                                    label={bin.source}
+                                  />
+                                  {bin.version && (
+                                    <Text size="sm" color="secondary" maxLines={1} className="num">
+                                      {bin.version}
+                                    </Text>
+                                  )}
+                                </HStack>
+                                <Text
+                                  type="supporting"
+                                  size="sm"
+                                  color="secondary"
+                                  maxLines={1}
+                                  className="num"
+                                >
+                                  {bin.available ? bin.resolvedPath : bin.installHint}
+                                </Text>
+                              </VStack>
+                            </div>
+
+                            <HStack vAlign="center" gap={1.5} className="shrink-0">
+                              <Button
+                                label={
+                                  isInstalling
+                                    ? 'Installing...'
+                                    : bin.available
+                                      ? 'Update'
+                                      : 'Install'
+                                }
+                                variant={bin.available ? 'secondary' : 'primary'}
+                                size="sm"
+                                isLoading={isInstalling}
+                                isDisabled={isInstalling}
+                                icon={<Download className="w-3 h-3" />}
+                                onClick={() => handleInstallBinary(bin.name)}
+                              />
+
+                              <IconButton
+                                label={
+                                  copiedCmd === bin.installHint
+                                    ? 'Copied command'
+                                    : `Copy install command: ${bin.installHint}`
+                                }
+                                variant="ghost"
+                                size="sm"
+                                icon={<Copy className="w-3 h-3" />}
+                                onClick={() => copyCommand(bin.installHint)}
+                              />
+                            </HStack>
                           </div>
-                          <p className="text-xs text-base-content/60 truncate mt-0.5 num">
-                            {bin.available ? bin.resolvedPath : bin.installHint}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          disabled={isInstalling}
-                          onClick={() => handleInstallBinary(bin.name)}
-                          className={`btn btn-xs gap-1.5 ${
-                            bin.available ? 'btn-ghost border border-base-300' : 'btn-primary'
-                          }`}
-                        >
-                          {isInstalling ? (
-                            <>
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              <span>Installing...</span>
-                            </>
-                          ) : (
-                            <>
-                              <Download className="w-3 h-3" />
-                              <span>{bin.available ? 'Update' : 'Install'}</span>
-                            </>
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => copyCommand(bin.installHint)}
-                          className="btn btn-xs btn-ghost border border-base-300 gap-1"
-                          title={`Copy: ${bin.installHint}`}
-                        >
-                          <Copy className="w-3 h-3" />
-                          <span>{copiedCmd === bin.installHint ? 'Copied' : 'Cmd'}</span>
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-            </div>
-          </section>
-        </div>
-
-        {/* Modal Footer */}
-        <div className="px-6 py-3 bg-base-100 border-t border-base-300 flex justify-end">
-          <button
-            type="button"
-            onClick={() => setSettingsModalOpen(false)}
-            className="btn btn-sm btn-primary"
-          >
-            Done
-          </button>
-        </div>
-      </div>
-
-      <form method="dialog" className="modal-backdrop">
-        <button type="button" onClick={() => setSettingsModalOpen(false)}>
-          close
-        </button>
-      </form>
-    </dialog>
+                        );
+                      })}
+                  </div>
+                </Card>
+              </VStack>
+            </VStack>
+          </LayoutContent>
+        }
+        footer={
+          <LayoutFooter hasDivider>
+            <HStack hAlign="end" width="100%">
+              <Button
+                label="Done"
+                variant="primary"
+                size="sm"
+                onClick={() => setSettingsModalOpen(false)}
+              />
+            </HStack>
+          </LayoutFooter>
+        }
+      />
+    </Dialog>
   );
 };

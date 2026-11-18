@@ -1,25 +1,27 @@
 import { create } from 'zustand';
-import type {
-  BinaryName,
-  BrowserSource,
-  ConverterJobConfig,
-  ConverterTargetFormat,
-  FixerJobConfig,
-  FixerPresetId,
-  JobConfig,
-  JobItem,
-  JobProgressEvent,
-  LocalImageMetadata,
-  LocalMediaMetadata,
-  LocalVideoMetadata,
-  MediaMetadata,
-  ModuleId,
-  QualityPreset,
-  StemMode,
-  SystemDiagnostics,
-  ThemeMode,
-  VectorJobConfig,
-  VectorPresetId
+import { persist } from 'zustand/middleware';
+import {
+  normalizeThemeMode,
+  type BinaryName,
+  type BrowserSource,
+  type ConverterJobConfig,
+  type ConverterTargetFormat,
+  type FixerJobConfig,
+  type FixerPresetId,
+  type JobConfig,
+  type JobItem,
+  type JobProgressEvent,
+  type LocalImageMetadata,
+  type LocalMediaMetadata,
+  type LocalVideoMetadata,
+  type MediaMetadata,
+  type ModuleId,
+  type QualityPreset,
+  type StemMode,
+  type SystemDiagnostics,
+  type ThemeMode,
+  type VectorJobConfig,
+  type VectorPresetId
 } from '../types/media';
 
 interface JobStoreState {
@@ -169,9 +171,11 @@ interface JobStoreState {
   removeJob: (jobId: string) => void;
 }
 
-export const useJobStore = create<JobStoreState>((set, get) => ({
+export const useJobStore = create<JobStoreState>()(
+  persist(
+    (set, get) => ({
   activeModule: 'ripper',
-  themeMode: 'antigravity-dark',
+  themeMode: 'dark',
   zoomFactor: 1,
   editReadyMode: true,
   browserCookies: 'none',
@@ -233,11 +237,13 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
 
   setActiveModule: (activeModule) => set({ activeModule }),
   setThemeMode: (themeMode) => {
-    document.documentElement.setAttribute('data-theme', themeMode);
+    const normalized = normalizeThemeMode(themeMode);
+    document.documentElement.setAttribute('data-theme', normalized);
+    document.documentElement.style.colorScheme = normalized;
     if (window.vortexApi?.setTheme) {
-      window.vortexApi.setTheme(themeMode).catch(() => {});
+      window.vortexApi.setTheme(normalized).catch(() => {});
     }
-    set({ themeMode });
+    set({ themeMode: normalized });
   },
   setZoomFactor: async (factor: number) => {
     const clamped = Math.min(1.5, Math.max(0.75, Math.round(factor * 100) / 100));
@@ -344,10 +350,10 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   clearStagedLocalVideos: () => set({ stagedLocalVideos: [], fixerError: null }),
 
   enqueueAndRunFixerJobs: async () => {
-    const state = get();
+    const initialState = get();
     if (
-      state.isFixingBatch ||
-      state.stagedLocalVideos.length === 0 ||
+      initialState.isFixingBatch ||
+      initialState.stagedLocalVideos.length === 0 ||
       !window.vortexApi?.startFixerJob
     ) {
       return;
@@ -361,13 +367,15 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
       'reel-optimizer': '1080p'
     };
 
-    const videosToProcess = [...state.stagedLocalVideos];
+    const videosToProcess = [...initialState.stagedLocalVideos];
     // Clear staged videos immediately so re-clicks cannot submit duplicates (MJ-1)
     set({ isFixingBatch: true, stagedLocalVideos: [], fixerError: null });
 
     try {
       // Execute sequentially to respect consumer GPU NVENC session limits (CB-1)
-      for (const video of videosToProcess) {
+      for (let i = 0; i < videosToProcess.length; i++) {
+        const video = videosToProcess[i];
+        const state = get();
         const jobId = `fix_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const fixerConfig: FixerJobConfig = {
           inputPath: video.filePath,
@@ -461,6 +469,10 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
           }));
 
           if (isCancelled) {
+            const remaining = videosToProcess.slice(i + 1);
+            if (remaining.length > 0) {
+              set((prev) => ({ stagedLocalVideos: [...remaining, ...prev.stagedLocalVideos] }));
+            }
             break;
           }
         }
@@ -521,22 +533,24 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
     set({ stagedLocalImages: [], vectorError: null, lastVectorPreview: null }),
 
   enqueueAndRunVectorJobs: async () => {
-    const state = get();
+    const initialState = get();
     if (
-      state.isVectorBatch ||
-      state.stagedLocalImages.length === 0 ||
+      initialState.isVectorBatch ||
+      initialState.stagedLocalImages.length === 0 ||
       !window.vortexApi?.startVectorJob
     ) {
       return;
     }
 
-    const imagesToProcess = [...state.stagedLocalImages];
+    const imagesToProcess = [...initialState.stagedLocalImages];
     // Clear staged images immediately so re-clicks cannot submit duplicates (MJ-1)
     set({ isVectorBatch: true, stagedLocalImages: [], vectorError: null });
 
     try {
       // Execute sequentially to prevent PyTorch/ONNX VRAM spikes (CB-1)
-      for (const img of imagesToProcess) {
+      for (let i = 0; i < imagesToProcess.length; i++) {
+        const img = imagesToProcess[i];
+        const state = get();
         const jobId = `vec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const vecConfig: VectorJobConfig = {
           inputPath: img.filePath,
@@ -621,6 +635,10 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
           }));
 
           if (isCancelled) {
+            const remaining = imagesToProcess.slice(i + 1);
+            if (remaining.length > 0) {
+              set((prev) => ({ stagedLocalImages: [...remaining, ...prev.stagedLocalImages] }));
+            }
             break;
           }
         }
@@ -689,24 +707,26 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
     set({ stagedConverterMedia: [], converterError: null }),
 
   enqueueAndRunConverterJobs: async () => {
-    const state = get();
+    const initialState = get();
     if (
-      state.isConvertingBatch ||
-      state.stagedConverterMedia.length === 0 ||
+      initialState.isConvertingBatch ||
+      initialState.stagedConverterMedia.length === 0 ||
       !window.vortexApi?.startConverterJob
     ) {
       return;
     }
 
-    const itemsToConvert = [...state.stagedConverterMedia];
+    const itemsToConvert = [...initialState.stagedConverterMedia];
     set({ isConvertingBatch: true, stagedConverterMedia: [], converterError: null });
 
     const isAudioTarget = ['wav', 'mp3', 'flac', 'm4a', 'ogg'].includes(
-      state.converterTargetFormat
+      initialState.converterTargetFormat
     );
 
     try {
-      for (const item of itemsToConvert) {
+      for (let i = 0; i < itemsToConvert.length; i++) {
+        const item = itemsToConvert[i];
+        const state = get();
         const jobId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         const convConfig: ConverterJobConfig = {
           inputPath: item.filePath,
@@ -794,6 +814,10 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
           }));
 
           if (isCancelled) {
+            const remaining = itemsToConvert.slice(i + 1);
+            if (remaining.length > 0) {
+              set((prev) => ({ stagedConverterMedia: [...remaining, ...prev.stagedConverterMedia] }));
+            }
             break; // Stop subsequent jobs in batch on cancellation
           }
         }
@@ -1005,4 +1029,27 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
       jobs: prev.jobs.filter((j) => j.id !== jobId)
     }));
   }
-}));
+}),
+    {
+      name: 'vortex_user_preferences_v1',
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.themeMode = normalizeThemeMode(state.themeMode);
+        }
+      },
+      partialize: (state) => ({
+        themeMode: state.themeMode,
+        zoomFactor: state.zoomFactor,
+        editReadyMode: state.editReadyMode,
+        browserCookies: state.browserCookies,
+        simulateIfMissingBinary: state.simulateIfMissingBinary,
+        outputDir: state.outputDir,
+        useHardwareEncoder: state.useHardwareEncoder,
+        selectedQuality: state.selectedQuality,
+        converterTargetFormat: state.converterTargetFormat,
+        converterSmartCopy: state.converterSmartCopy,
+        converterSampleRate: state.converterSampleRate
+      })
+    }
+  )
+);

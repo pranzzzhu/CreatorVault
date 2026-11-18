@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
 
 // 1. Verify Timestamp Formatting (Fix 3 & YtDlp millisecond rollover)
 function formatSecondsToTimestamp(sec) {
@@ -268,6 +271,19 @@ test('computePremiereXmlTimeline enforces contiguous frame accumulation and NTSC
   assert.equal(palRes.ntscFlag, 'FALSE');
   assert.ok(palRes.clips[0].outFrame > palRes.clips[0].inFrame);
   assert.equal(palRes.clips[0].clipDurFrames, 1);
+});
+
+test('DRAG_ICON_DATA_URL in electron/main.ts is a valid non-empty 32x32 PNG', () => {
+  const mainSrc = fs.readFileSync(path.join(process.cwd(), 'electron', 'main.ts'), 'utf8');
+  const match = mainSrc.match(/DRAG_ICON_DATA_URL\s*=\s*['"]data:image\/png;base64,([^'"]+)['"]/);
+  assert.ok(match, 'DRAG_ICON_DATA_URL must be defined in electron/main.ts');
+  const pngBuf = Buffer.from(match[1], 'base64');
+  assert.deepEqual(pngBuf.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const idatIdx = pngBuf.indexOf('IDAT');
+  assert.ok(idatIdx > 0, 'PNG must contain an IDAT chunk');
+  const idatLen = pngBuf.readUInt32BE(idatIdx - 4);
+  const inflated = zlib.inflateSync(pngBuf.subarray(idatIdx + 4, idatIdx + 4 + idatLen));
+  assert.equal(inflated.length, 32 * (1 + 32 * 4));
 });
 
 

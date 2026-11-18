@@ -7,10 +7,17 @@ import {
   Minus,
   PenTool,
   Plus,
-  RotateCcw,
   Settings,
   Zap
 } from 'lucide-react';
+import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
+import { ButtonGroup } from '@astryxdesign/core/ButtonGroup';
+import { ClickableCard } from '@astryxdesign/core/ClickableCard';
+import { Divider } from '@astryxdesign/core/Divider';
+import { IconButton } from '@astryxdesign/core/IconButton';
+import { HStack, VStack } from '@astryxdesign/core/Layout';
+import { Text } from '@astryxdesign/core/Text';
 import { useJobStore } from '../../store/useJobStore';
 import type { ModuleId } from '../../types/media';
 
@@ -67,129 +74,147 @@ export const SidebarRail: React.FC = () => {
   const hw = diagnostics?.hardware;
 
   return (
-    <aside className="w-60 shrink-0 bg-base-100 border-r border-base-300 flex flex-col justify-between select-none">
-      {/* Top Draggable Brand Header */}
+    <aside className="w-64 shrink-0 bg-surface border-r border-border flex flex-col justify-between select-none">
+      {/* Top Draggable Brand Header & Navigation */}
       <div>
-        <div className="h-12 px-4 flex items-center justify-between border-b border-base-300 app-drag-region">
-          <div className="flex items-center gap-2.5">
-            <div className="w-6 h-6 rounded-md bg-base-300 flex items-center justify-center text-base-content">
+        <div className="h-12 px-4 flex items-center justify-between border-b border-border app-drag-region">
+          <HStack vAlign="center" gap={2}>
+            <div className="w-6 h-6 rounded-sm bg-muted border border-border flex items-center justify-center text-primary">
               <Zap className="w-3.5 h-3.5" />
             </div>
-            <span className="font-semibold text-sm tracking-tight text-base-content">
+            <Text weight="semibold" size="sm" color="primary">
               Vortex
-            </span>
-          </div>
-          <span className="badge badge-xs badge-ghost num">v0.2</span>
+            </Text>
+          </HStack>
+          <Badge variant="neutral" label="v0.3" />
         </div>
 
-        {/* Workspace Navigation Menu */}
-        <div className="p-3">
-          <div className="px-2 pb-1.5 text-xs font-medium text-base-content/50">
-            Workspaces
+        <div className="p-3 space-y-2">
+          <div className="px-2">
+            <Text type="supporting" size="sm" weight="medium" color="secondary">
+              Workspaces
+            </Text>
           </div>
-          <ul className="menu menu-sm p-0 gap-1 w-full">
+
+          <nav aria-label="Workspaces" className="flex flex-col gap-1">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
               const isActive = activeModule === item.id;
               return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveModule(item.id)}
-                    className={`flex items-center gap-3 px-3 py-2.5 rounded-lg ${
-                      isActive
-                        ? 'bg-base-300 text-base-content font-medium'
-                        : 'text-base-content/70 hover:text-base-content hover:bg-base-200'
-                    }`}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <div className="flex flex-col items-start min-w-0">
-                      <span className="text-xs leading-tight truncate">{item.label}</span>
-                      <span className="text-[11px] text-base-content/50 leading-tight truncate">
-                        {item.subtitle}
-                      </span>
-                    </div>
-                  </button>
-                </li>
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setActiveModule(item.id)}
+                  aria-current={isActive ? 'page' : undefined}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left transition-colors cursor-pointer ${
+                    isActive
+                      ? 'bg-muted text-primary font-medium border border-border'
+                      : 'text-secondary hover:text-primary hover:bg-overlay-hover border border-transparent'
+                  }`}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <div className="flex flex-col min-w-0">
+                    <span className="text-xs leading-tight truncate">{item.label}</span>
+                    <span className="text-[11px] text-secondary leading-tight truncate">
+                      {item.subtitle}
+                    </span>
+                  </div>
+                </button>
               );
             })}
-          </ul>
+          </nav>
         </div>
       </div>
 
-      {/* Bottom Status Pill & Settings Dialog Trigger (Just like Antigravity sidebar) */}
-      <div className="p-3 border-t border-base-300 space-y-2">
-        {/* Compact Telemetry Summary Card */}
-        <button
-          type="button"
-          onClick={() => setSettingsModalOpen(true)}
-          className="w-full text-left px-3 py-2 rounded-lg bg-base-200 hover:bg-base-300 border border-base-300 transition-colors duration-150 space-y-1 cursor-pointer"
-        >
-          <div className="flex items-center justify-between text-xs">
-            <span className="flex items-center gap-1.5 font-medium text-base-content/80">
-              <Cpu className="w-3.5 h-3.5 text-accent" />
-              <span className="truncate">
-                {hw?.hasNvidiaCuda ? 'RTX CUDA' : hw?.hasAppleSilicon ? 'Apple MPS' : 'CPU Mode'}
-              </span>
-            </span>
-            <span className="badge badge-xs badge-neutral">
-              {editReadyMode ? 'Edit-Ready' : 'Raw'}
-            </span>
-          </div>
-          <div className="text-[11px] text-base-content/50 flex items-center justify-between">
-            <span>Built-in tools</span>
-            {diagnostics === null ? (
-              <span className="text-base-content/60 font-medium">Scanning...</span>
-            ) : (
-              <span className={missingCount > 0 ? 'text-warning font-medium' : 'text-success font-medium'}>
-                {missingCount === 0 ? 'All ready' : `${totalCount - missingCount}/${totalCount} installed`}
-              </span>
-            )}
-          </div>
-        </button>
-
-        {/* Settings & Zoom Row */}
-        <div className="flex items-center justify-between gap-1">
-          <button
-            type="button"
+      {/* Bottom Telemetry Card & Settings/Zoom Footer */}
+      <div>
+        <Divider />
+        <VStack gap={2} padding={3}>
+          <ClickableCard
+            label="Open engine diagnostics and settings"
+            padding={2}
+            variant="muted"
             onClick={() => setSettingsModalOpen(true)}
-            className="btn btn-ghost btn-sm flex-1 justify-start font-normal text-base-content/80 hover:text-base-content hover:bg-base-200 px-2.5"
           >
-            <Settings className="w-4 h-4" />
-            <span className="text-xs font-medium">Settings</span>
-            {missingCount > 0 && (
-              <span className="badge badge-xs badge-warning ml-auto">{missingCount}</span>
-            )}
-          </button>
+            <VStack gap={1}>
+              <HStack vAlign="center" hAlign="between" gap={2}>
+                <HStack vAlign="center" gap={1.5} className="min-w-0">
+                  <Cpu className="w-3.5 h-3.5 text-info shrink-0" />
+                  <Text size="sm" weight="medium" color="primary" maxLines={1}>
+                    {hw?.hasNvidiaCuda
+                      ? 'RTX CUDA'
+                      : hw?.hasAppleSilicon
+                        ? 'Apple MPS'
+                        : 'CPU Mode'}
+                  </Text>
+                </HStack>
+                <Badge
+                  variant="neutral"
+                  label={editReadyMode ? 'Edit-Ready' : 'Raw'}
+                />
+              </HStack>
 
-          {/* Antigravity Quick Zoom Controls (- 100% +) */}
-          <div className="join border border-base-300 rounded-lg bg-base-200">
-            <button
-              type="button"
-              onClick={zoomOut}
-              title="Zoom Out (Ctrl -)"
-              className="btn btn-ghost btn-xs join-item px-1.5"
-            >
-              <Minus className="w-3 h-3" />
-            </button>
-            <button
-              type="button"
-              onClick={resetZoom}
-              title="Reset Zoom (Ctrl 0)"
-              className="btn btn-ghost btn-xs join-item px-1.5 num text-[11px] font-normal"
-            >
-              {Math.round(zoomFactor * 100)}%
-            </button>
-            <button
-              type="button"
-              onClick={zoomIn}
-              title="Zoom In (Ctrl +)"
-              className="btn btn-ghost btn-xs join-item px-1.5"
-            >
-              <Plus className="w-3 h-3" />
-            </button>
-          </div>
-        </div>
+              <HStack vAlign="center" hAlign="between" gap={2}>
+                <Text type="supporting" size="sm" color="secondary">
+                  Built-in tools
+                </Text>
+                {diagnostics === null ? (
+                  <Text size="sm" color="secondary" weight="medium">
+                    Scanning...
+                  </Text>
+                ) : (
+                  <Text
+                    size="sm"
+                    weight="medium"
+                    className={missingCount > 0 ? 'text-warning' : 'text-success'}
+                  >
+                    {missingCount === 0
+                      ? 'All ready'
+                      : `${totalCount - missingCount}/${totalCount} installed`}
+                  </Text>
+                )}
+              </HStack>
+            </VStack>
+          </ClickableCard>
+
+          <HStack vAlign="center" hAlign="between" gap={2}>
+            <Button
+              label="Settings"
+              variant="ghost"
+              size="sm"
+              icon={<Settings className="w-3.5 h-3.5" />}
+              endContent={
+                missingCount > 0 ? (
+                  <Badge variant="warning" label={missingCount} />
+                ) : undefined
+              }
+              onClick={() => setSettingsModalOpen(true)}
+              className="shrink-0"
+            />
+
+            <ButtonGroup label="Workspace zoom" size="sm">
+              <IconButton
+                label="Zoom Out (Ctrl -)"
+                icon={<Minus className="w-3 h-3" />}
+                variant="secondary"
+                onClick={zoomOut}
+              />
+              <Button
+                label={`${Math.round(zoomFactor * 100)}%`}
+                variant="secondary"
+                tooltip="Reset Zoom (Ctrl 0)"
+                onClick={resetZoom}
+                className="tabular-nums"
+              />
+              <IconButton
+                label="Zoom In (Ctrl +)"
+                icon={<Plus className="w-3 h-3" />}
+                variant="secondary"
+                onClick={zoomIn}
+              />
+            </ButtonGroup>
+          </HStack>
+        </VStack>
       </div>
     </aside>
   );

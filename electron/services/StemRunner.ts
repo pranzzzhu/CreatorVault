@@ -14,6 +14,16 @@ export class StemRunner {
   private cancelledJobs = new Set<string>();
   private gpuMutex: Promise<void> = Promise.resolve();
 
+  private markCancelled(jobId: string): void {
+    if (this.cancelledJobs.size > 200) {
+      const oldest = this.cancelledJobs.values().next().value;
+      if (oldest) this.cancelledJobs.delete(oldest);
+    }
+    this.cancelledJobs.add(jobId);
+    const timer = setTimeout(() => this.cancelledJobs.delete(jobId), 60_000);
+    timer.unref?.();
+  }
+
   constructor(
     private getPythonPath: () => string,
     private isDemucsAvailable: () => boolean,
@@ -161,7 +171,7 @@ export class StemRunner {
 
         proc.stderr.on('data', (chunk: Buffer) => {
           const str = chunk.toString();
-          stderrText += str;
+          stderrText = (stderrText + str).slice(-8192);
           parseDemucsProgress(str);
         });
 
@@ -192,9 +202,22 @@ export class StemRunner {
 
           if (code === 0) {
             const trackFolderName = path.parse(demucsInputPath).name;
-            const htdemucsDir = path.join(stemsOutDir, 'htdemucs', trackFolderName);
-            const pills = this.collectStemPills(inputMediaPath, htdemucsDir, config);
-            resolve({ pills, usedSimulation: false });
+            let htdemucsDir = path.join(stemsOutDir, 'htdemucs', trackFolderName);
+            if (!fs.existsSync(htdemucsDir)) {
+              const parentDir = path.join(stemsOutDir, 'htdemucs');
+              if (fs.existsSync(parentDir)) {
+                const subDirs = fs.readdirSync(parentDir);
+                if (subDirs.length > 0) {
+                  htdemucsDir = path.join(parentDir, subDirs[0]);
+                }
+              }
+            }
+            try {
+              const pills = this.collectStemPills(inputMediaPath, htdemucsDir, config, false);
+              resolve({ pills, usedSimulation: false });
+            } catch (pillErr) {
+              reject(pillErr);
+            }
           } else {
             const cleanErr = stderrText.trim().slice(-600) || `Demucs exited with code ${code}`;
             reject(new Error(cleanErr));
@@ -209,7 +232,8 @@ export class StemRunner {
   private collectStemPills(
     inputMediaPath: string,
     htdemucsDir: string,
-    config: JobConfig
+    config: JobConfig,
+    allowSynthesizedFallback: boolean
   ): StemOutputPill[] {
     const pills: StemOutputPill[] = [];
     const isAudioOnly = config.quality === 'audio-wav' || config.quality === 'audio-mp3';
@@ -241,13 +265,21 @@ export class StemRunner {
           ];
 
     if (!fs.existsSync(htdemucsDir)) {
-      fs.mkdirSync(htdemucsDir, { recursive: true });
+      if (allowSynthesizedFallback) {
+        fs.mkdirSync(htdemucsDir, { recursive: true });
+      } else {
+        throw new Error(`Demucs output folder not found at ${htdemucsDir}`);
+      }
     }
 
     for (const item of candidates) {
       const fullStemPath = path.join(htdemucsDir, item.file);
       if (!fs.existsSync(fullStemPath)) {
-        this.ffmpegRunner.writeValidSilentWav(fullStemPath, 6, item.freq);
+        if (allowSynthesizedFallback) {
+          this.ffmpegRunner.writeValidSilentWav(fullStemPath, 6, item.freq);
+        } else {
+          throw new Error(`Demucs completed, but expected stem "${item.file}" is missing in ${htdemucsDir}`);
+        }
       }
       pills.push({
         id: `stem_${item.type}`,
@@ -289,13 +321,13 @@ export class StemRunner {
 
     const trackFolderName = path.parse(demucsInputPath).name;
     const htdemucsDir = path.join(stemsOutDir, 'htdemucs', trackFolderName);
-    const pills = this.collectStemPills(masterMediaPath, htdemucsDir, config);
+    const pills = this.collectStemPills(masterMediaPath, htdemucsDir, config, true);
 
     return { pills, usedSimulation: true };
   }
 
   public cancelJob(jobId: string): boolean {
-    this.cancelledJobs.add(jobId);
+    this.markCancelled(jobId);
     const proc = this.activeProcesses.get(jobId);
     if (proc) {
       killProcessTree(proc);
@@ -307,7 +339,7 @@ export class StemRunner {
 
   public cancelAll(): void {
     for (const [jobId, proc] of this.activeProcesses.entries()) {
-      this.cancelledJobs.add(jobId);
+      this.markCancelled(jobId);
       killProcessTree(proc);
     }
     this.activeProcesses.clear();

@@ -1,8 +1,11 @@
-import { spawn, spawnSync, execFileSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import type { BinaryName, BinaryStatus } from '../../src/types/media';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Terminates a child process and its entire descendant tree (e.g. ffmpeg spawned by yt-dlp
@@ -49,19 +52,132 @@ export class BinaryManager {
     return this.binDir;
   }
 
-  private resolveExecutable(binaryName: string): {
+  public getManagedVenvPythonPath(): string {
+    const isWin = process.platform === 'win32';
+    return isWin
+      ? path.join(this.binDir, 'venv', 'Scripts', 'python.exe')
+      : path.join(this.binDir, 'venv', 'bin', 'python3');
+  }
+
+  public getPythonCandidates(): Array<{ cmd: string; source: 'local-bin' | 'system-path' }> {
+    const isWin = process.platform === 'win32';
+    const portablePython = path.join(
+      this.binDir,
+      'python',
+      isWin ? 'python.exe' : 'bin/python3'
+    );
+    const venvPython = this.getManagedVenvPythonPath();
+
+    const candidates: Array<{ cmd: string; source: 'local-bin' | 'system-path' }> = [];
+
+    // 1. Portable embedded python
+    if (fs.existsSync(portablePython)) {
+      candidates.push({ cmd: portablePython, source: 'local-bin' });
+    }
+    // 2. Managed isolated venv python
+    if (fs.existsSync(venvPython)) {
+      candidates.push({ cmd: venvPython, source: 'local-bin' });
+    }
+    // 3. System PATH python (read-only detection fallback)
+    candidates.push({ cmd: 'python', source: 'system-path' });
+    candidates.push({ cmd: 'python3', source: 'system-path' });
+
+    return candidates;
+  }
+
+  public getPythonPath(): string {
+    const available = this.getPythonCandidates().find((c) => c.source === 'local-bin');
+    return available?.cmd || (process.platform === 'win32' ? 'python' : 'python3');
+  }
+
+  private async ensureManagedVenv(): Promise<string> {
+    const isWin = process.platform === 'win32';
+    const portablePython = path.join(
+      this.binDir,
+      'python',
+      isWin ? 'python.exe' : 'bin/python3'
+    );
+    if (fs.existsSync(portablePython)) {
+      return portablePython;
+    }
+
+    const venvPython = this.getManagedVenvPythonPath();
+    if (fs.existsSync(venvPython)) {
+      return venvPython;
+    }
+
+    const venvDir = path.join(this.binDir, 'venv');
+    const systemCandidate =
+      this.getPythonCandidates().find((c) => c.source === 'system-path')?.cmd || 'python';
+
+    try {
+      await execFileAsync(systemCandidate, ['-m', 'venv', venvDir], {
+        windowsHide: true,
+        timeout: 60000
+      });
+      if (fs.existsSync(venvPython)) {
+        try {
+          await execFileAsync(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip'], {
+            windowsHide: true,
+            timeout: 60000
+          });
+        } catch {
+          // Non-critical if pip upgrade fails
+        }
+        return venvPython;
+      }
+    } catch {
+      // Fallback to system candidate if venv creation fails
+    }
+    return systemCandidate;
+  }
+
+  private async probeVersion(cmdPath: string, args: string[]): Promise<string | undefined> {
+    try {
+      const { stdout, stderr } = await execFileAsync(cmdPath, args, {
+        timeout: 3000,
+        windowsHide: true
+      });
+      const firstLine = (stdout || stderr || '').split(/\r?\n/)[0]?.trim();
+      return firstLine ? firstLine.slice(0, 48) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async probePythonModules(
+    pythonCmd: string
+  ): Promise<Record<'demucs' | 'rembg' | 'vtracer' | 'spandrel', boolean>> {
+    const def = { demucs: false, rembg: false, vtracer: false, spandrel: false };
+    try {
+      const code =
+        'import importlib.util, json; mods = ["demucs", "rembg", "vtracer", "spandrel"]; print(json.dumps({m: bool(importlib.util.find_spec(m)) for m in mods}))';
+      const { stdout } = await execFileAsync(pythonCmd, ['-c', code], {
+        timeout: 4000,
+        windowsHide: true
+      });
+      const parsed = JSON.parse(stdout.trim());
+      return { ...def, ...parsed };
+    } catch {
+      return def;
+    }
+  }
+
+  private async resolveExecutable(binaryName: string): Promise<{
     available: boolean;
     resolvedPath: string;
     source: 'local-bin' | 'system-path' | 'missing';
     version?: string;
-  } {
+  }> {
     const isWin = process.platform === 'win32';
     const exeName = isWin ? `${binaryName}.exe` : binaryName;
+    const versionArgs =
+      binaryName === 'ffmpeg' || binaryName === 'ffprobe' ? ['-version'] : ['--version'];
 
     // 1. Check ./bin folder first
     const localCandidate = path.join(this.binDir, exeName);
     if (fs.existsSync(localCandidate)) {
-      const ver = this.probeVersion(localCandidate, binaryName === 'ffmpeg' || binaryName === 'ffprobe' ? ['-version'] : ['--version']);
+      const ver = await this.probeVersion(localCandidate, versionArgs);
       return {
         available: true,
         resolvedPath: localCandidate,
@@ -73,18 +189,17 @@ export class BinaryManager {
     // 2. Fallback to system PATH
     try {
       const locateCmd = isWin ? 'where' : 'which';
-      const output = execFileSync(locateCmd, [binaryName], {
-        encoding: 'utf8',
+      const { stdout } = await execFileAsync(locateCmd, [binaryName], {
         timeout: 3000,
         windowsHide: true
       });
-      const firstLine = output
+      const firstLine = stdout
         .split(/\r?\n/)
         .map((l) => l.trim())
         .find((l) => l.length > 0);
 
       if (firstLine && fs.existsSync(firstLine)) {
-        const ver = this.probeVersion(firstLine, binaryName === 'ffmpeg' || binaryName === 'ffprobe' ? ['-version'] : ['--version']);
+        const ver = await this.probeVersion(firstLine, versionArgs);
         return {
           available: true,
           resolvedPath: firstLine,
@@ -96,14 +211,11 @@ export class BinaryManager {
       // Not found in system PATH
     }
 
-    // 3. Fallback to WinGet Packages folder on Windows (handles unrefreshed PATH)
+    // 3. Fallback to WinGet Packages folder on Windows
     if (isWin) {
       const wingetFound = this.findInWinGetPackages(exeName);
       if (wingetFound) {
-        const ver = this.probeVersion(
-          wingetFound,
-          binaryName === 'ffmpeg' || binaryName === 'ffprobe' ? ['-version'] : ['--version']
-        );
+        const ver = await this.probeVersion(wingetFound, versionArgs);
         return {
           available: true,
           resolvedPath: wingetFound,
@@ -138,7 +250,6 @@ export class BinaryManager {
         const directExe = path.join(pkgPath, exeName);
         if (fs.existsSync(directExe)) return directExe;
 
-        // Check one or two levels deep (e.g., ffmpeg-9.0.2-full_build/bin/ffmpeg.exe)
         const subDirs = fs.readdirSync(pkgPath, { withFileTypes: true });
         for (const sub of subDirs) {
           if (!sub.isDirectory()) continue;
@@ -154,208 +265,150 @@ export class BinaryManager {
     return null;
   }
 
-  public getPythonPath(): string {
-    return this.getPythonCandidates()[0]?.cmd || 'python';
-  }
-
-  private getPythonCandidates(): Array<{ cmd: string; source: 'local-bin' | 'system-path' }> {
-    const isWin = process.platform === 'win32';
-    const localPython = path.join(
-      this.binDir,
-      'python',
-      isWin ? 'python.exe' : 'bin/python3'
-    );
-
-    return fs.existsSync(localPython)
-      ? [{ cmd: localPython, source: 'local-bin' as const }]
-      : [
-          { cmd: 'python', source: 'system-path' as const },
-          { cmd: 'python3', source: 'system-path' as const }
-        ];
-  }
-
-  private hasPythonModule(pythonCmd: string, moduleName: string): boolean {
-    try {
-      const res = spawnSync(
-        pythonCmd,
-        ['-c', `import importlib.util; print("ok" if importlib.util.find_spec("${moduleName}") else "no")`],
-        {
-          encoding: 'utf8',
-          timeout: 3000,
-          windowsHide: true
-        }
-      );
-      return res.status === 0 && Boolean(res.stdout?.includes('ok'));
-    } catch {
-      return false;
+  public async checkAllBinaries(forceRefresh = false): Promise<Record<BinaryName, BinaryStatus>> {
+    if (this.cachedStatuses && !forceRefresh) {
+      return this.cachedStatuses;
     }
-  }
 
-  private resolveDemucs(): BinaryStatus {
-    for (const candidate of this.getPythonCandidates()) {
-      if (this.hasPythonModule(candidate.cmd, 'demucs')) {
-        return {
+    const [ytdlp, ffmpeg, ffprobe, vtracerCli, realesrganCli] = await Promise.all([
+      this.resolveExecutable('yt-dlp'),
+      this.resolveExecutable('ffmpeg'),
+      this.resolveExecutable('ffprobe'),
+      this.resolveExecutable('vtracer'),
+      this.resolveExecutable('realesrgan-ncnn-vulkan')
+    ]);
+
+    // Batch probe Python candidates
+    const pythonCandidates = this.getPythonCandidates();
+    let pythonWithDemucs: { cmd: string; source: 'local-bin' | 'system-path' } | null = null;
+    let pythonWithRembg: { cmd: string; source: 'local-bin' | 'system-path' } | null = null;
+    let pythonWithVtracer: { cmd: string; source: 'local-bin' | 'system-path' } | null = null;
+    let pythonWithSpandrel: { cmd: string; source: 'local-bin' | 'system-path' } | null = null;
+
+    for (const cand of pythonCandidates) {
+      const mods = await this.probePythonModules(cand.cmd);
+      if (mods.demucs && !pythonWithDemucs) pythonWithDemucs = cand;
+      if (mods.rembg && !pythonWithRembg) pythonWithRembg = cand;
+      if (mods.vtracer && !pythonWithVtracer) pythonWithVtracer = cand;
+      if (mods.spandrel && !pythonWithSpandrel) pythonWithSpandrel = cand;
+    }
+
+    // Demucs status
+    const demucs: BinaryStatus = pythonWithDemucs
+      ? {
           name: 'demucs',
           available: true,
-          resolvedPath: candidate.cmd,
-          source: candidate.source,
+          resolvedPath: pythonWithDemucs.cmd,
+          source: pythonWithDemucs.source,
           version: 'htdemucs (PyTorch)',
           installHint: 'pip install -U demucs torch torchaudio'
+        }
+      : {
+          name: 'demucs',
+          available: false,
+          resolvedPath: 'python',
+          source: 'missing',
+          installHint: 'pip install -U demucs'
         };
-      }
-    }
 
-    return {
-      name: 'demucs',
-      available: false,
-      resolvedPath: 'python',
-      source: 'missing',
-      installHint: 'pip install -U demucs'
-    };
-  }
-
-  private resolveRembg(): BinaryStatus {
+    // Rembg status
     const u2netPath = path.join(os.homedir(), '.u2net', 'u2net.onnx');
-    const hasModel = fs.existsSync(u2netPath);
-
-    for (const candidate of this.getPythonCandidates()) {
-      if (this.hasPythonModule(candidate.cmd, 'rembg') && hasModel) {
-        return {
+    const hasU2net = fs.existsSync(u2netPath);
+    let rembg: BinaryStatus;
+    if (pythonWithRembg && hasU2net) {
+      rembg = {
+        name: 'rembg',
+        available: true,
+        resolvedPath: pythonWithRembg.cmd,
+        source: pythonWithRembg.source,
+        version: 'rembg 2.0 (U2Net ONNX)',
+        installHint: 'pip install -U rembg onnxruntime'
+      };
+    } else {
+      const cli = await this.resolveExecutable('rembg');
+      if (cli.available && hasU2net) {
+        rembg = {
           name: 'rembg',
           available: true,
-          resolvedPath: candidate.cmd,
-          source: candidate.source,
-          version: 'rembg 2.0 (U2Net ONNX)',
+          resolvedPath: cli.resolvedPath,
+          source: cli.source,
+          version: cli.version || 'rembg CLI',
+          installHint: 'pip install -U "rembg[cli]"'
+        };
+      } else {
+        rembg = {
+          name: 'rembg',
+          available: false,
+          resolvedPath: 'python',
+          source: 'missing',
           installHint: 'pip install -U rembg onnxruntime'
         };
       }
     }
 
-    const cli = this.resolveExecutable('rembg');
-    if (cli.available && hasModel) {
-      return {
-        name: 'rembg',
-        available: true,
-        resolvedPath: cli.resolvedPath,
-        source: cli.source,
-        version: cli.version || 'rembg CLI',
-        installHint: 'pip install -U "rembg[cli]"'
-      };
-    }
-
-    return {
-      name: 'rembg',
-      available: false,
-      resolvedPath: 'python',
-      source: 'missing',
-      installHint: 'pip install -U rembg onnxruntime'
-    };
-  }
-
-  private resolveVtracer(): BinaryStatus {
-    const cli = this.resolveExecutable('vtracer');
-    if (cli.available) {
-      return {
+    // VTracer status
+    let vtracer: BinaryStatus;
+    if (vtracerCli.available) {
+      vtracer = {
         name: 'vtracer',
         available: true,
-        resolvedPath: cli.resolvedPath,
-        source: cli.source,
-        version: cli.version || 'vtracer CLI',
+        resolvedPath: vtracerCli.resolvedPath,
+        source: vtracerCli.source,
+        version: vtracerCli.version || 'vtracer CLI',
+        installHint: 'pip install -U vtracer'
+      };
+    } else if (pythonWithVtracer) {
+      vtracer = {
+        name: 'vtracer',
+        available: true,
+        resolvedPath: pythonWithVtracer.cmd,
+        source: pythonWithVtracer.source,
+        version: 'vtracer 0.6.15 (Rust Engine)',
+        installHint: 'pip install -U vtracer'
+      };
+    } else {
+      vtracer = {
+        name: 'vtracer',
+        available: false,
+        resolvedPath: 'python',
+        source: 'missing',
         installHint: 'pip install -U vtracer'
       };
     }
 
-    for (const candidate of this.getPythonCandidates()) {
-      if (this.hasPythonModule(candidate.cmd, 'vtracer')) {
-        return {
-          name: 'vtracer',
-          available: true,
-          resolvedPath: candidate.cmd,
-          source: candidate.source,
-          version: 'vtracer 0.6.15 (Rust Engine)',
-          installHint: 'pip install -U vtracer'
-        };
-      }
-    }
-
-    return {
-      name: 'vtracer',
-      available: false,
-      resolvedPath: 'python',
-      source: 'missing',
-      installHint: 'pip install -U vtracer'
-    };
-  }
-
-  private resolveRealesrgan(): BinaryStatus {
-    const cli = this.resolveExecutable('realesrgan-ncnn-vulkan');
-    if (cli.available) {
-      return {
+    // Real-ESRGAN status
+    const modelPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
+    const hasWeights = fs.existsSync(modelPath);
+    let realesrgan: BinaryStatus;
+    if (realesrganCli.available) {
+      realesrgan = {
         name: 'realesrgan',
         available: true,
-        resolvedPath: cli.resolvedPath,
-        source: cli.source,
+        resolvedPath: realesrganCli.resolvedPath,
+        source: realesrganCli.source,
         version: 'realesrgan-ncnn-vulkan',
         installHint: 'pip install -U spandrel torchvision'
       };
+    } else if (pythonWithSpandrel && hasWeights) {
+      realesrgan = {
+        name: 'realesrgan',
+        available: true,
+        resolvedPath: modelPath,
+        source: 'local-bin',
+        version: 'Real-ESRGAN x4plus (CUDA/PyTorch)',
+        installHint: 'Installed (spandrel + RealESRGAN_x4plus.pth)'
+      };
+    } else {
+      realesrgan = {
+        name: 'realesrgan',
+        available: false,
+        resolvedPath: 'python',
+        source: 'missing',
+        installHint: !hasWeights && pythonWithSpandrel
+          ? 'Click 1-Click Install to download RealESRGAN_x4plus.pth weights into ./bin/models'
+          : 'Click 1-Click Install or run: pip install -U spandrel torchvision'
+      };
     }
-
-    const modelPath = path.join(this.binDir, 'models', 'RealESRGAN_x4plus.pth');
-    const hasWeights = fs.existsSync(modelPath);
-
-    for (const candidate of this.getPythonCandidates()) {
-      if (this.hasPythonModule(candidate.cmd, 'spandrel') && hasWeights) {
-        return {
-          name: 'realesrgan',
-          available: true,
-          resolvedPath: modelPath,
-          source: 'local-bin',
-          version: 'Real-ESRGAN x4plus (CUDA/PyTorch)',
-          installHint: 'Installed (spandrel + RealESRGAN_x4plus.pth)'
-        };
-      }
-    }
-
-    const hasSpandrel = this.getPythonCandidates().some(c => this.hasPythonModule(c.cmd, 'spandrel'));
-    const installHint = !hasWeights && hasSpandrel
-      ? 'Click 1-Click Install to download RealESRGAN_x4plus.pth weights into ./bin/models'
-      : 'Click 1-Click Install or run: pip install -U spandrel torchvision';
-
-    return {
-      name: 'realesrgan',
-      available: false,
-      resolvedPath: 'python',
-      source: 'missing',
-      installHint
-    };
-  }
-
-  private probeVersion(cmdPath: string, args: string[]): string | undefined {
-    try {
-      const res = spawnSync(cmdPath, args, {
-        encoding: 'utf8',
-        timeout: 3000,
-        windowsHide: true
-      });
-      const firstLine = (res.stdout || res.stderr || '').split(/\r?\n/)[0]?.trim();
-      return firstLine ? firstLine.slice(0, 48) : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  public checkAllBinaries(forceRefresh = false): Record<BinaryName, BinaryStatus> {
-    if (this.cachedStatuses && !forceRefresh) {
-      return this.cachedStatuses;
-    }
-
-    const ytdlp = this.resolveExecutable('yt-dlp');
-    const ffmpeg = this.resolveExecutable('ffmpeg');
-    const ffprobe = this.resolveExecutable('ffprobe');
-    const demucs = this.resolveDemucs();
-    const rembg = this.resolveRembg();
-    const vtracer = this.resolveVtracer();
-    const realesrgan = this.resolveRealesrgan();
 
     this.cachedStatuses = {
       'yt-dlp': {
@@ -383,26 +436,31 @@ export class BinaryManager {
   }
 
   public getBinaryPath(name: BinaryName): string {
-    const statuses = this.checkAllBinaries();
-    return statuses[name].resolvedPath;
+    if (this.cachedStatuses && this.cachedStatuses[name]) {
+      return this.cachedStatuses[name].resolvedPath;
+    }
+    const isWin = process.platform === 'win32';
+    const localCandidate = path.join(this.binDir, isWin ? `${name}.exe` : name);
+    return fs.existsSync(localCandidate) ? localCandidate : name;
   }
 
   public isBinaryAvailable(name: BinaryName): boolean {
-    const statuses = this.checkAllBinaries();
-    return statuses[name].available;
+    if (this.cachedStatuses && this.cachedStatuses[name]) {
+      return this.cachedStatuses[name].available;
+    }
+    const isWin = process.platform === 'win32';
+    const localCandidate = path.join(this.binDir, isWin ? `${name}.exe` : name);
+    return fs.existsSync(localCandidate);
   }
 
   /**
    * 1-Click Sidecar Installer invoked from Settings -> Sidecar Binaries.
-   * Uses PyPI and Hugging Face CDN to avoid GitHub Releases network throttling.
+   * Installs Python packages into isolated ./bin/venv without mutating global environment.
    */
   public async installBinary(name: BinaryName): Promise<{ success: boolean; message: string }> {
-    const pythonCmd = this.getPythonCandidates()[0]?.cmd || 'python';
-
     const runCmd = (cmd: string, args: string[]): Promise<void> =>
       new Promise((resolve, reject) => {
         const proc = spawn(cmd, args, { windowsHide: true });
-        // Drain stdout so child processes never block on a full OS pipe buffer (CB-2)
         proc.stdout?.resume();
 
         let stderr = '';
@@ -417,6 +475,11 @@ export class BinaryManager {
       });
 
     try {
+      let pythonCmd = this.getPythonPath();
+      if (name === 'rembg' || name === 'vtracer' || name === 'realesrgan' || name === 'demucs') {
+        pythonCmd = await this.ensureManagedVenv();
+      }
+
       if (name === 'rembg') {
         await runCmd(pythonCmd, ['-m', 'pip', 'install', '-U', 'rembg', 'onnxruntime', 'pymatting', 'pooch', 'huggingface_hub']);
         await runCmd(pythonCmd, [
@@ -467,7 +530,7 @@ export class BinaryManager {
             fs.chmodSync(tempPath, '755');
             if (process.platform === 'darwin') {
               try {
-                execFileSync('xattr', ['-d', 'com.apple.quarantine', tempPath], { stdio: 'ignore' });
+                execFileAsync('xattr', ['-d', 'com.apple.quarantine', tempPath]).catch(() => {});
               } catch {}
             }
           }
@@ -506,7 +569,7 @@ export class BinaryManager {
         }
       }
 
-      this.checkAllBinaries(true);
+      await this.checkAllBinaries(true);
       return {
         success: true,
         message: `${name} installed and verified.`
